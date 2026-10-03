@@ -41,7 +41,6 @@ from openhands.sdk.agent.acp_models import (
     ACPConfigOptionValue,
     ACPSessionControls,
 )
-from openhands.sdk.conversation import LocalConversation
 from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
@@ -51,7 +50,7 @@ from openhands.sdk.event import ACPSessionControlsEvent, Event
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.utils.async_executor import AsyncExecutor
 from openhands.sdk.workspace import LocalWorkspace
-from tests.conftest import scripted_acp_command
+from tests.conftest import controls_events, scripted_acp_command, wait_until
 
 
 SUMMARIZE = ACPAvailableCommand(name="summarize", description="Summarize the input")
@@ -84,18 +83,6 @@ THOROUGH = ACPSessionControls(
 
 def command(name: str, description: str = "") -> AvailableCommand:
     return AvailableCommand(name=name, description=description)
-
-
-def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.02)
-
-
-def controls_events(events: Any) -> list[ACPSessionControlsEvent]:
-    return [e for e in events if isinstance(e, ACPSessionControlsEvent)]
 
 
 def methods(log: list[dict[str, Any]]) -> list[str]:
@@ -141,28 +128,6 @@ def start(tmp_path: Path) -> Iterator[Callable[..., Started]]:
     yield _start
     for run in started:
         run.agent.close()
-
-
-@pytest.fixture
-def conversation(tmp_path: Path) -> Iterator[Callable[..., LocalConversation]]:
-    conversations: list[LocalConversation] = []
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(exist_ok=True)
-
-    def _conversation(*flags: str, **fields: Any) -> LocalConversation:
-        agent = ACPAgent(acp_command=scripted_acp_command(*flags), **fields)
-        conv = LocalConversation(
-            agent,
-            workspace=str(workspace),
-            persistence_dir=str(tmp_path / "conversations"),
-            visualizer=None,
-        )
-        conversations.append(conv)
-        return conv
-
-    yield _conversation
-    for conv in conversations:
-        conv.close()
 
 
 def bridged_agent(session_id: str = "root") -> tuple[ACPAgent, _OpenHandsACPBridge]:
@@ -347,9 +312,9 @@ def test_nothing_is_published_while_a_session_is_starting():
 
 
 def test_start_values_reach_the_agent_after_session_new_and_before_the_prompt(
-    conversation, acp_request_log
+    scripted_conversation, acp_request_log
 ):
-    conv = conversation(acp_config_options={"profile": "thorough"})
+    conv = scripted_conversation(acp_config_options={"profile": "thorough"})
     conv.send_message("hello")
 
     conv.run()
@@ -392,9 +357,9 @@ async def test_values_are_set_in_order_and_every_response_is_recorded():
 
 
 def test_a_refused_start_value_ends_the_start_and_no_prompt_is_sent(
-    conversation, acp_request_log
+    scripted_conversation, acp_request_log
 ):
-    conv = conversation(acp_config_options={"profile": "turbo"})
+    conv = scripted_conversation(acp_config_options={"profile": "turbo"})
     conv.send_message("hello")
 
     with pytest.raises(ACPConfigOptionRejectedError):

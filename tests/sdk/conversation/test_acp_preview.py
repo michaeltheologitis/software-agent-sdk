@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,23 +13,18 @@ import pytest
 
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.agent.acp_models import ACPSessionControls
-from openhands.sdk.conversation import LocalConversation
 from openhands.sdk.conversation.acp_preview import (
     PREVIEW_COMMANDS_WAIT_SECONDS,
     ACPPreviewError,
     preview_acp_session,
 )
-from openhands.sdk.event import ACPSessionControlsEvent
 from openhands.sdk.workspace import LocalWorkspace
-from tests.conftest import SCRIPTED_ACP_AGENT, scripted_acp_command
-
-
-def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.02)
+from tests.conftest import (
+    SCRIPTED_ACP_AGENT,
+    controls_events,
+    scripted_acp_command,
+    wait_until,
+)
 
 
 def live_scripted_agents() -> list[psutil.Process]:
@@ -59,40 +54,6 @@ def preview(
     return _preview
 
 
-@pytest.fixture
-def started_controls(
-    tmp_path: Path, workspace: LocalWorkspace
-) -> Iterator[Callable[..., ACPSessionControls]]:
-    """The controls a started conversation reports before its first prompt."""
-    conversations: list[LocalConversation] = []
-
-    def _started(**fields: Any) -> ACPSessionControls:
-        conv = LocalConversation(
-            ACPAgent(acp_command=scripted_acp_command(), **fields),
-            workspace=workspace,
-            persistence_dir=str(tmp_path / "conversations"),
-            visualizer=None,
-        )
-        conversations.append(conv)
-        # No message: the session starts, and the run ends without a prompt.
-        conv.run()
-
-        def latest() -> ACPSessionControls | None:
-            events = [
-                e for e in conv.state.events if isinstance(e, ACPSessionControlsEvent)
-            ]
-            return events[-1].controls if events else None
-
-        wait_until(lambda: (controls := latest()) and controls.available_commands)
-        controls = latest()
-        assert controls is not None
-        return controls
-
-    yield _started
-    for conv in conversations:
-        conv.close()
-
-
 @pytest.mark.parametrize(
     "values, commands",
     [
@@ -102,12 +63,21 @@ def started_controls(
     ],
 )
 def test_the_preview_equals_the_started_session_before_its_first_prompt(
-    preview, started_controls, values, commands
+    preview, scripted_conversation, values, commands
 ):
     previewed = preview(acp_config_options=values)
+    conv = scripted_conversation(acp_config_options=values)
 
+    # No message: the session starts, and the run ends without a prompt.
+    conv.run()
+
+    wait_until(
+        lambda: any(
+            e.available_commands for e in controls_events(conv.state.events)[-1:]
+        )
+    )
     assert [c.name for c in previewed.available_commands] == commands
-    assert previewed == started_controls(acp_config_options=values)
+    assert previewed == controls_events(conv.state.events)[-1].controls
 
 
 def test_session_close_is_sent_when_the_agent_advertises_it(preview, acp_request_log):
