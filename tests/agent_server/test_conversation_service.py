@@ -1,6 +1,7 @@
 import asyncio
 import json
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -4338,3 +4339,56 @@ async def test_refresh_persisted_conversation_only_decrypts_requested_record(
         assert reads == [conversation_id]
         assert await service.get_conversation(conversation_id) is not None
         assert reads == [conversation_id]
+
+
+@pytest.mark.parametrize("named_by", ["agent", "agent_settings", "agent_profile_id"])
+async def test_resolve_launch_gives_the_start_and_the_preview_the_same_agent(
+    tmp_path, monkeypatch, named_by
+):
+    from openhands.agent_server.persistence import reset_stores
+    from openhands.agent_server.persistence.store import get_agent_profile_store
+    from openhands.sdk.profiles.agent_profile import ACPAgentProfile
+    from tests.conftest import SCRIPTED_ACP_AGENT, scripted_acp_command
+
+    reset_stores()
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    profile = ACPAgentProfile(
+        name="scripted",
+        acp_server="custom",
+        acp_command=sys.executable,
+        acp_args=[str(SCRIPTED_ACP_AGENT)],
+    )
+    get_agent_profile_store().save(profile)
+    agent_fields: dict[str, Any] = {
+        "agent": {"agent": ACPAgent(acp_command=scripted_acp_command())},
+        "agent_settings": {
+            "agent_settings": {
+                "agent_kind": "acp",
+                "acp_server": "custom",
+                "acp_command": scripted_acp_command(),
+            }
+        },
+        "agent_profile_id": {"agent_profile_id": profile.id},
+    }[named_by]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir=str(workspace)),
+        acp_config_options={"profile": "thorough"},
+        autotitle=False,
+        **agent_fields,
+    )
+
+    try:
+        async with ConversationService(
+            conversations_dir=tmp_path / "conversations"
+        ) as service:
+            previewed, _ = await service._resolve_launch(request)
+            info, _ = await service.start_conversation(request)
+    finally:
+        reset_stores()
+
+    base_state = tmp_path / "conversations" / info.id.hex / "base_state.json"
+    started = json.loads(base_state.read_text())["agent"]
+    assert started == previewed.agent.model_dump(mode="json", exclude_none=True)
+    assert started["acp_config_options"] == {"profile": "thorough"}
