@@ -107,6 +107,19 @@ class _Runtime:
         self.stop_requested = asyncio.Event()
 
 
+def _group_exited(error: OSError) -> bool:
+    """Whether ``killpg`` failed because a backend's process group has exited.
+
+    ESRCH everywhere. On macOS also EPERM, its answer for a group whose
+    remaining members are all zombies: the group is ours and runs as our user,
+    so a refusal there means nothing of it is left to signal. Elsewhere EPERM is
+    a real failure and surfaces.
+    """
+    if isinstance(error, ProcessLookupError):
+        return True
+    return isinstance(error, PermissionError) and platform.system() == "Darwin"
+
+
 class CanvasExtensionBackendManager:
     """Owns one optional backend process per installed Canvas App."""
 
@@ -560,15 +573,18 @@ class CanvasExtensionBackendManager:
     def _signal_group(pgid: int, sig: int) -> None:
         try:
             os.killpg(pgid, sig)
-        except ProcessLookupError:
-            pass
+        except OSError as error:
+            if not _group_exited(error):
+                raise
 
     @staticmethod
     def _group_alive(pgid: int) -> bool:
         try:
             os.killpg(pgid, 0)
             return True
-        except ProcessLookupError:
+        except OSError as error:
+            if not _group_exited(error):
+                raise
             return False
 
     async def _wait_for_group_exit(self, pgid: int, timeout: float) -> bool:

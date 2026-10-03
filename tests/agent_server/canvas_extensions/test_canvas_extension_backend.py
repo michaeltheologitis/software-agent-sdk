@@ -1,9 +1,11 @@
 import asyncio
+import errno
 import hashlib
 import io
 import json
 import os
 import platform
+import signal
 import tarfile
 import time
 from pathlib import Path
@@ -497,3 +499,72 @@ async def test_a_backend_becomes_ready_with_a_proxy_configured(
         assert started.state == "ready", started.detail
     finally:
         await manager.shutdown()
+
+
+def _killpg_as_on_macos(real_killpg):
+    """``os.killpg`` answering as macOS does: EPERM, not ESRCH, once a group's
+    remaining members are all zombies (here: once the group has exited)."""
+
+    def killpg(pgid: int, sig: int) -> None:
+        try:
+            real_killpg(pgid, sig)
+        except ProcessLookupError as exc:
+            raise PermissionError(errno.EPERM, "Operation not permitted") from exc
+
+    return killpg
+
+
+def _refuse(pgid: int, sig: int) -> None:
+    raise PermissionError(errno.EPERM, "Operation not permitted")
+
+
+_GROUP_CALLS = {
+    "probe": lambda: CanvasExtensionBackendManager._group_alive(4242),
+    "signal": lambda: CanvasExtensionBackendManager._signal_group(4242, signal.SIGTERM),
+}
+
+
+@pytest.mark.parametrize("call", list(_GROUP_CALLS))
+def test_a_refusal_to_signal_the_group_on_macos_means_it_exited(
+    monkeypatch: pytest.MonkeyPatch, call: str
+):
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(os, "killpg", _refuse)
+
+    assert not _GROUP_CALLS[call]()
+
+
+@pytest.mark.parametrize("call", list(_GROUP_CALLS))
+def test_a_refusal_to_signal_the_group_elsewhere_still_fails(
+    monkeypatch: pytest.MonkeyPatch, call: str
+):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(os, "killpg", _refuse)
+
+    with pytest.raises(PermissionError):
+        _GROUP_CALLS[call]()
+
+
+@pytest.mark.asyncio
+async def test_stop_completes_when_macos_refuses_to_signal_the_exited_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = _write_backend_extension(tmp_path / "source" / "my-extension")
+    installed_dir = tmp_path / "installed"
+    install_canvas_extension(str(source), installed_dir=installed_dir)
+    manager = CanvasExtensionBackendManager(installed_dir, tmp_path / "state")
+    revision = manager.revision("my-extension")
+    assert revision is not None
+    await manager.prepare("my-extension", revision)
+    assert (await manager.start("my-extension", revision)).state == "ready"
+    runtime_file = manager.data_dir / "my-extension" / "runtime.json"
+    child_pid = json.loads(runtime_file.read_text())["child_pid"]
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(os, "killpg", _killpg_as_on_macos(os.killpg))
+
+    stopped = await manager.stop("my-extension")
+
+    assert stopped.state == "stopped"
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    await manager.shutdown()
