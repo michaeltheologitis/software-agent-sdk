@@ -2827,6 +2827,27 @@ class _SyncOnlyAgent(AgentBase):
         pass
 
 
+class TestEventServiceCancelACPSession:
+    async def test_cancel_acp_session_runs_off_the_event_loop(self, event_service):
+        ran_on: list[int] = []
+        conversation = MagicMock()
+        conversation.cancel_acp_session.side_effect = lambda _: ran_on.append(
+            threading.get_ident()
+        )
+        event_service._conversation = conversation
+
+        await event_service.cancel_acp_session("child-b")
+
+        conversation.cancel_acp_session.assert_called_once_with("child-b")
+        assert ran_on and ran_on[0] != threading.get_ident()
+
+    async def test_cancel_acp_session_on_an_inactive_service_is_refused(
+        self, event_service
+    ):
+        with pytest.raises(ValueError, match="inactive_service"):
+            await event_service.cancel_acp_session("child-b")
+
+
 class TestEventServiceClose:
     """Tests for EventService.close() awaiting conversation teardown."""
 

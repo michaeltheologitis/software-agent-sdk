@@ -2663,3 +2663,94 @@ def test_interrupt_endpoint_cancels_running_conversation(
         assert events_resp.status_code == 200
         items = events_resp.json()["items"]
         assert len(items) >= 1, f"Expected at least one InterruptEvent, got: {items}"
+
+
+def test_acp_subagent_sessions_over_live_server(server_env, acp_request_log):
+    """A sub-agent run through a real server: the tree reaches REST and the
+    WebSocket alike, and the cancel route stops one child end to end."""
+    from openhands.sdk.agent import ACPAgent
+    from openhands.sdk.event import ACPSubagentEvent
+    from tests.conftest import scripted_acp_command
+
+    agent = ACPAgent(
+        acp_command=scripted_acp_command("--subagents", "--cancel-wait", "30"),
+        acp_subagents=True,
+    )
+    workspace = RemoteWorkspace(
+        host=server_env["host"], working_dir=str(server_env["workspace_path"])
+    )
+    conv = cast(RemoteConversation, Conversation(agent=agent, workspace=workspace))
+    sub_agent_kinds = {
+        "ACPSubagentEvent",
+        "ACPSessionMessageEvent",
+        "ACPSessionTextEvent",
+    }
+    try:
+        conv.send_message("hello")
+        conv.run(blocking=False)
+        with httpx.Client(base_url=server_env["host"], timeout=10) as client:
+            cancel_url = f"/api/conversations/{conv.id}/acp/sessions/child-b/cancel"
+            deadline = time.monotonic() + 30
+            while (response := client.post(cancel_url)).status_code != 200:
+                assert response.status_code in (404, 409), response.text
+                assert time.monotonic() < deadline, "child-b was never announced"
+                time.sleep(0.05)
+            assert response.json() == {"session_id": "child-b", "requested": True}
+
+            def rest_events() -> list[dict]:
+                return client.get(
+                    f"/api/conversations/{conv.id}/events/search",
+                    params={"limit": 100},
+                ).json()["items"]
+
+            def child_b_cancelled() -> bool:
+                snapshots = [
+                    e
+                    for e in rest_events()
+                    if e["kind"] == "ACPSubagentEvent"
+                    and e["acp_session_id"] == "child-b"
+                ]
+                return bool(snapshots) and snapshots[-1].get("stop_reason") == (
+                    "cancelled"
+                )
+
+            while not child_b_cancelled():
+                assert time.monotonic() < deadline, "child-b never turned cancelled"
+                time.sleep(0.05)
+            over_rest = rest_events()
+
+        # The stored log, read over REST, is the contract's order: the
+        # spawning cell's started event comes before every child event, and
+        # each child's events never go back in time.
+        cell = next(
+            i
+            for i, e in enumerate(over_rest)
+            if e["kind"] == "ACPToolCallEvent" and e["tool_call_id"] == "cell-1"
+        )
+        stamps: dict[str, list[str]] = {}
+        for i, e in enumerate(over_rest):
+            if e["kind"] in sub_agent_kinds and e.get("acp_session_id"):
+                assert i > cell
+                stamps.setdefault(e["acp_session_id"], []).append(e["timestamp"])
+        assert set(stamps) == {"child-a", "child-a-1", "child-b", "child-c"}
+        assert all(times == sorted(times) for times in stamps.values())
+
+        # The client's cache keeps its own (timestamp) order; what matters is
+        # that every sub-agent event reached the WebSocket subscriber.
+        rest_ids = {e["id"] for e in over_rest if e["kind"] in sub_agent_kinds}
+        while {
+            e.id for e in conv.state.events if type(e).__name__ in sub_agent_kinds
+        } != rest_ids:
+            assert time.monotonic() < deadline + 10, "WebSocket never caught up"
+            time.sleep(0.05)
+        last_child_b = [
+            e
+            for e in conv.state.events
+            if isinstance(e, ACPSubagentEvent) and e.acp_session_id == "child-b"
+        ][-1]
+        assert (last_child_b.state, last_child_b.stop_reason) == ("idle", "cancelled")
+        assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
+            acp_request_log()
+        )
+    finally:
+        conv.close()
