@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -89,14 +89,11 @@ def methods(log: list[dict[str, Any]]) -> list[str]:
     return [entry["method"] for entry in log]
 
 
-class Started:
+class Started(NamedTuple):
     """An ACP agent started on a state of its own, publishing into a list."""
 
-    def __init__(self, agent: ACPAgent, state: ConversationState) -> None:
-        self.agent = agent
-        self.state = state
-        self.published: list[Event] = []
-        self.emitted: list[Event] = []
+    agent: ACPAgent
+    published: list[Event]
 
 
 @pytest.fixture
@@ -119,10 +116,10 @@ def start(tmp_path: Path) -> Iterator[Callable[..., Started]]:
             workspace=LocalWorkspace(working_dir=str(workspace)),
             persistence_dir=str(persistence_dir or tmp_path / uuid.uuid4().hex),
         )
-        run = Started(agent, state)
+        run = Started(agent, [])
         agent._on_session_event = run.published.append
         started.append(run)
-        agent.init_state(state, on_event=run.emitted.append)
+        agent.init_state(state, on_event=lambda _event: None)
         return run
 
     yield _start
@@ -130,14 +127,16 @@ def start(tmp_path: Path) -> Iterator[Callable[..., Started]]:
         run.agent.close()
 
 
-def bridged_agent(session_id: str = "root") -> tuple[ACPAgent, _OpenHandsACPBridge]:
-    """An agent wired to a bridge with no process behind it."""
+def bridged_agent() -> tuple[ACPAgent, _OpenHandsACPBridge, list[Event]]:
+    """An agent on session "root" of a bridge with no process, and what it publishes."""
     agent = ACPAgent(acp_command=["unused"])
     bridge = _OpenHandsACPBridge()
     agent._client = bridge
-    agent._session_id = session_id
+    agent._session_id = "root"
     agent._bind_session_controls()
-    return agent, bridge
+    published: list[Event] = []
+    agent._on_session_event = published.append
+    return agent, bridge, published
 
 
 # -- Recording and publishing -------------------------------------------------
@@ -155,15 +154,11 @@ def test_controls_reported_while_the_session_starts_are_published_once_it_starte
 def test_commands_reported_after_session_new_answered_are_published(start):
     run = start()
 
-    wait_until(lambda: run.agent.session_controls.available_commands)
-
     wait_until(lambda: controls_events(run.published)[-1].controls == FAST)
 
 
 def test_each_session_keeps_its_own_controls_and_only_the_root_is_published():
-    agent, bridge = bridged_agent("root")
-    published: list[Event] = []
-    agent._on_session_event = published.append
+    _, bridge, published = bridged_agent()
 
     bridge.record_available_commands("root", [command("root-cmd")])
     bridge.record_available_commands("child", [command("child-cmd")])
@@ -235,10 +230,8 @@ async def test_session_updates_of_both_kinds_are_recorded_and_not_routed_on():
 def test_agent_supplied_text_is_masked_before_it_is_stored():
     registry = SecretRegistry()
     registry.update_secrets({"API_TOKEN": "tok-12345"})
-    agent, bridge = bridged_agent()
+    _, bridge, published = bridged_agent()
     bridge.mask = registry.mask_secrets_in_output
-    published: list[Event] = []
-    agent._on_session_event = published.append
 
     bridge.record_available_commands("root", [command("leak", "uses tok-12345")])
     bridge.record_config_options(
@@ -261,7 +254,7 @@ def test_agent_supplied_text_is_masked_before_it_is_stored():
 
 
 def test_concurrent_publishes_keep_snapshot_order_and_end_on_the_newest():
-    agent, bridge = bridged_agent()
+    agent, bridge, _ = bridged_agent()
     published: list[ACPSessionControlsEvent] = []
 
     def slow_sink(event: Event) -> None:
@@ -298,9 +291,7 @@ def test_concurrent_publishes_keep_snapshot_order_and_end_on_the_newest():
 
 
 def test_nothing_is_published_while_a_session_is_starting():
-    agent, bridge = bridged_agent()
-    published: list[Event] = []
-    agent._on_session_event = published.append
+    agent, bridge, published = bridged_agent()
     agent._starting_session = True
 
     bridge.record_available_commands("root", [command("early")])
@@ -441,9 +432,7 @@ def test_the_model_option_and_an_empty_id_are_refused_in_the_field(config_id):
 
 
 def test_a_model_switch_through_set_config_option_updates_the_published_model():
-    agent, bridge = bridged_agent()
-    published: list[Event] = []
-    agent._on_session_event = published.append
+    agent, bridge, published = bridged_agent()
     model_option = SessionConfigOptionSelect(
         type="select",
         id="model",
