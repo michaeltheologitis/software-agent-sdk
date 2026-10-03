@@ -201,8 +201,7 @@ def _extension_with_icon(directory: Path, icon: str = "dist/panel.svg") -> Path:
 
 
 @pytest.mark.parametrize(
-    "make_icon",
-    ["symlink-outside", "missing", "directory", "symlink-to-other-type"],
+    "make_icon", ["symlink-outside", "missing", "directory", "symlink-to-other-type"]
 )
 def test_an_icon_that_is_not_a_contained_image_makes_the_install_invalid(
     tmp_path: Path, make_icon: str
