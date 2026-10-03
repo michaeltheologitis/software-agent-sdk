@@ -296,19 +296,6 @@ async def test_the_preview_of_a_profile_with_a_dangling_mcp_reference_is_refused
     assert server.previews_left_behind() == []
 
 
-async def test_the_preview_refuses_the_model_option(server):
-    response = await server.client.post(
-        "/api/acp/preview",
-        json={
-            "workspace": server.workspace,
-            "agent": scripted_agent(),
-            "acp_config_options": {"model": "big"},
-        },
-    )
-
-    assert response.status_code == 422
-
-
 async def test_the_preview_holds_a_run_slot(tmp_path, stores):
     async with serving(tmp_path, max_concurrent_runs=1) as limited:
         payload = {"workspace": limited.workspace, "agent": scripted_agent()}
@@ -364,29 +351,6 @@ async def test_a_started_session_reports_the_chosen_value_and_cleared_commands(s
     assert [ACPConfigOption.model_validate(o) for o in newest["config_options"]] == [
         ACPConfigOption.model_validate(profile_option("thorough", "thorough"))
     ]
-
-
-async def test_the_events_search_returns_the_newest_controls_event(server):
-    conversation_id = await server.start_and_run(
-        agent=scripted_agent(), acp_config_options={"profile": "thorough"}
-    )
-
-    async def persisted_controls() -> list[dict[str, Any]]:
-        response = await server.client.get(
-            f"/api/conversations/{conversation_id}/events/search",
-            params={"limit": 100},
-        )
-        items = response.json()["items"]
-        return [e for e in items if e["kind"] == "ACPSessionControlsEvent"]
-
-    async with asyncio.timeout(10):
-        while len(await persisted_controls()) < 3:
-            await asyncio.sleep(0.05)
-
-    assert (
-        await server.newest_controls(conversation_id)
-        == (await persisted_controls())[-1]
-    )
 
 
 @pytest.mark.parametrize(

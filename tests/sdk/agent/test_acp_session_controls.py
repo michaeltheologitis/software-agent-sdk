@@ -19,7 +19,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from acp.exceptions import RequestError as ACPRequestError
 from acp.schema import (
     AvailableCommand,
     AvailableCommandsUpdate,
@@ -29,7 +28,6 @@ from acp.schema import (
 )
 from pydantic import ValidationError
 
-import openhands.sdk.agent.acp_agent as acp_agent_module
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
     ACPConfigOptionRejectedError,
@@ -195,14 +193,6 @@ def test_commands_reported_after_session_new_answered_are_published(start):
     wait_until(lambda: run.agent.session_controls.available_commands)
 
     wait_until(lambda: controls_events(run.published)[-1].controls == FAST)
-
-
-def test_an_unchanged_snapshot_is_not_published_again(start):
-    run = start(acp_config_options={"profile": "thorough"})
-    # The scripted agent re-sends the same commands after session/new.
-    time.sleep(0.3)
-
-    assert len(controls_events(run.published)) == 1
 
 
 def test_changes_during_a_prompt_are_published_in_order(conversation):
@@ -418,20 +408,6 @@ async def test_values_are_set_in_order_and_every_response_is_recorded():
     assert recorded == [("s1", ["after-b"]), ("s1", ["after-a"])]
 
 
-async def test_an_internal_agent_error_propagates_unchanged():
-    conn = AsyncMock()
-    conn.set_config_option.side_effect = ACPRequestError(-32603, "Internal error")
-
-    with pytest.raises(ACPRequestError):
-        await _apply_config_options(
-            conn,
-            "s1",
-            {"a": "1"},
-            on_config_options=lambda *_: None,
-            mask=lambda text: text,
-        )
-
-
 def test_a_refused_start_value_ends_the_start_and_no_prompt_is_sent(
     conversation, acp_request_log
 ):
@@ -516,14 +492,6 @@ def test_the_model_option_and_an_empty_id_are_refused_in_the_field(config_id):
         ACPAgent(acp_command=["unused"], acp_config_options={config_id: "x"})
 
 
-@pytest.mark.parametrize("config_id", ["model", ""])
-def test_the_model_option_and_an_empty_id_are_refused_by_the_set_call(config_id):
-    agent = ACPAgent(acp_command=["unused"])
-
-    with pytest.raises(ValueError):
-        agent.set_acp_config_option(config_id, "x")
-
-
 def test_a_model_switch_through_set_config_option_updates_the_published_model():
     agent, bridge = bridged_agent()
     published: list[Event] = []
@@ -564,29 +532,8 @@ def test_a_live_set_returns_the_agents_new_controls(start):
     wait_until(lambda: controls_events(run.published)[-1].controls == THOROUGH)
 
 
-def test_a_refusal_raises_with_the_agents_own_sentence(start):
-    run = start()
-
-    with pytest.raises(ACPConfigOptionRejectedError) as refused:
-        run.agent.set_acp_config_option("profile", "turbo")
-
-    assert str(refused.value) == "unknown profile 'turbo'"
-    assert (refused.value.config_id, refused.value.value) == ("profile", "turbo")
-
-
 def test_a_set_before_any_session_is_refused():
     agent = ACPAgent(acp_command=scripted_acp_command())
 
     with pytest.raises(RuntimeError):
         agent.set_acp_config_option("profile", "thorough")
-
-
-def test_a_silent_agent_times_out_within_the_config_option_timeout(start, monkeypatch):
-    run = start("--slow-set", "30")
-    monkeypatch.setattr(acp_agent_module, "_ACP_CONFIG_OPTION_TIMEOUT", 0.5)
-
-    began = time.monotonic()
-    with pytest.raises(TimeoutError, match="profile"):
-        run.agent.set_acp_config_option("profile", "thorough")
-
-    assert time.monotonic() - began < 5

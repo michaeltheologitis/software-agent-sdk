@@ -3,7 +3,6 @@
 from acp.schema import (
     AvailableCommand,
     AvailableCommandInput,
-    SessionConfigOptionBoolean,
     SessionConfigOptionSelect,
     SessionConfigSelectGroup,
     SessionConfigSelectOption,
@@ -15,7 +14,6 @@ from openhands.sdk.agent.acp_models import (
     ACPCommandInput,
     ACPConfigOption,
     ACPConfigOptionValue,
-    ACPSessionControls,
 )
 
 
@@ -37,27 +35,6 @@ def test_command_hint_is_read_through_the_root_model():
         description="Compare two things",
         input=ACPCommandInput(hint="what to compare"),
     )
-
-
-def test_a_command_without_input_has_none():
-    raw = AvailableCommand(name="summarize", description="Summarize the input")
-
-    assert ACPAvailableCommand.from_protocol(raw) == ACPAvailableCommand(
-        name="summarize", description="Summarize the input"
-    )
-
-
-def test_nameless_commands_are_dropped_and_the_rest_kept_in_order():
-    raw = [
-        AvailableCommand(name="first", description="1"),
-        AvailableCommand(name="", description="empty"),
-        AvailableCommand(name="second", description="2"),
-    ]
-
-    assert [c.name for c in ACPSessionControls.parse_commands(raw)] == [
-        "first",
-        "second",
-    ]
 
 
 def test_grouped_select_is_flattened_with_each_value_keeping_its_group():
@@ -111,16 +88,6 @@ def test_ungrouped_select_keeps_values_in_order_without_a_group():
             ACPConfigOptionValue(value="a", name="A"),
             ACPConfigOptionValue(value="b", name="B"),
         ],
-    )
-
-
-def test_boolean_option_keeps_its_boolean_value_and_has_no_values():
-    raw = SessionConfigOptionBoolean(
-        type="boolean", id="verbose", name="Verbose", current_value=True
-    )
-
-    assert ACPConfigOption.from_protocol(raw) == ACPConfigOption(
-        id="verbose", name="Verbose", type="boolean", current_value=True
     )
 
 

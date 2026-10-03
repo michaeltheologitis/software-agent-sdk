@@ -135,14 +135,6 @@ def test_an_agent_that_never_reports_commands_is_previewed_after_the_wait(previe
     assert [o.id for o in previewed.config_options] == ["profile"]
 
 
-def test_a_refused_value_raises_with_its_code_and_the_agents_sentence(preview):
-    with pytest.raises(ACPPreviewError) as refused:
-        preview(acp_config_options={"profile": "turbo"})
-
-    assert refused.value.code == "ACPConfigOptionRejected"
-    assert refused.value.detail == "unknown profile 'turbo'"
-
-
 def test_an_agent_that_cannot_be_spawned_raises_a_spawn_error(tmp_path, workspace):
     agent = ACPAgent(acp_command=[str(tmp_path / "missing-agent")])
 

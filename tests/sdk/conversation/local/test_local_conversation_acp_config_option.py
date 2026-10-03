@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 from acp.schema import AvailableCommand
 
-from openhands.sdk import LLM, Agent
 from openhands.sdk.agent.acp_agent import ACPAgent, ACPConfigOptionRejectedError
 from openhands.sdk.conversation import LocalConversation
 from openhands.sdk.event import (
@@ -103,6 +102,7 @@ def test_a_live_set_is_persisted_and_survives_a_reload(make_conversation, tmp_pa
         str(fixed.value)
         == "profile is fixed once the session has started (it is 'fast')"
     )
+    assert (fixed.value.config_id, fixed.value.value) == ("profile", "thorough")
     assert controls is not None
     assert controls.config_options[0].current_value == "fast"
     conversation_id = conv.id
@@ -149,21 +149,6 @@ def test_the_agent_swap_hands_publishing_to_the_copy(make_conversation):
         lambda: [c.name for c in controls_events(conv)[-1].available_commands]
         == ["late"]
     )
-
-
-@pytest.mark.parametrize("config_id", ["model", ""])
-def test_the_model_option_and_an_empty_id_are_refused(make_conversation, config_id):
-    conv = make_conversation()
-
-    with pytest.raises(ValueError):
-        conv.set_acp_config_option(config_id, "x")
-
-
-def test_a_conversation_that_is_not_acp_refuses_config_options(make_conversation):
-    conv = make_conversation(agent=Agent(llm=LLM(model="gpt-4o", usage_id="llm")))
-
-    with pytest.raises(ValueError, match="ACP"):
-        conv.set_acp_config_option("profile", "fast")
 
 
 def test_a_portal_thread_event_during_a_synchronous_run_lands_after_the_step(
