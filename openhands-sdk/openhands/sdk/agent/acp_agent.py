@@ -3816,8 +3816,10 @@ class ACPAgent(AgentBase):
         for tc in self._client.accumulated_tool_calls:
             status = tc.get("status")
             child = tc.get("acp_session_id")
-            if status in _TERMINAL_TOOL_CALL_STATUSES or (
-                child is None and on_event is None
+            if (
+                status in _TERMINAL_TOOL_CALL_STATUSES
+                or (child is None and on_event is None)
+                or tc.get("failed_by_abort")
             ):
                 continue
             try:
@@ -3835,8 +3837,12 @@ class ACPAgent(AgentBase):
                 )
                 if child is not None:
                     # The emitter's FIFO keeps it after the call's own
-                    # ``started`` event, which went the same way.
+                    # ``started`` event, which went the same way. The entry
+                    # stays open, across turns, for the agent's own report,
+                    # which lands after this one and so wins; later aborts
+                    # skip it.
                     self._client.emit_subagent_events([failure])
+                    tc["failed_by_abort"] = True
                 elif on_event is not None:
                     on_event(failure)
             except Exception:

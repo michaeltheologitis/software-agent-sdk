@@ -474,6 +474,25 @@ async def test_aborted_turn_fails_child_tool_calls_with_their_session(wire):
     ] == [("c1", "failed", "child-a", {"cell": 1})]
 
 
+async def test_child_call_open_across_aborted_turns_is_failed_once_and_the_agents_report_wins(  # noqa: E501
+    wire,
+):
+    agent = wire.agent()
+    await wire.send(ROOT, announce("child-a"))
+    await wire.send("child-a", tool_call("c1"))
+
+    for _aborted_turn in range(2):
+        agent._cancel_inflight_tool_calls()
+        wire.bridge.reset()
+    await wire.send("child-a", tool_done("c1"))
+
+    assert [
+        (e.tool_call_id, e.status)
+        for e in wire.emitted
+        if isinstance(e, ACPToolCallEvent)
+    ] == [("c1", "in_progress"), ("c1", "failed"), ("c1", "completed")]
+
+
 async def test_child_events_go_to_the_session_emitter_and_root_events_to_the_turn(
     wire,
 ):
