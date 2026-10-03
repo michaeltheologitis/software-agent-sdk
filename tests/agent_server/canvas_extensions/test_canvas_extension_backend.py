@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from openhands.agent_server.canvas_extensions.backend import (
+    BackendStatus,
     CanvasExtensionBackendManager,
     _Runtime,
 )
@@ -62,10 +63,20 @@ http.server.HTTPServer((\"127.0.0.1\", port), Handler).serve_forever()
 """
 
 
-def _write_backend_extension(directory: Path, *, timeout: float = 3) -> Path:
+def _write_backend_extension(
+    directory: Path, *, timeout: float | None = None, launch_delay: float = 0
+) -> Path:
+    """An extension whose backend serves ``_SERVER`` on every platform.
+
+    Its health check keeps the manifest's default budget unless a test is about
+    the budget itself and passes ``timeout``. ``launch_delay`` holds the backend
+    back before it runs, as a slow interpreter launch does.
+    """
     write_extension(directory)
     archive = directory / "backend-linux-amd64.tar.gz"
-    script = _SERVER.encode()
+    shebang, body = _SERVER.split("\n", 1)
+    delay = f"import time\ntime.sleep({launch_delay})\n" if launch_delay else ""
+    script = f"{shebang}\n{delay}{body}".encode()
     with tarfile.open(archive, "w:gz") as tar:
         info = tarfile.TarInfo("server.py")
         info.mode = 0o755
@@ -100,14 +111,28 @@ def _write_backend_extension(directory: Path, *, timeout: float = 3) -> Path:
             "{data_dir}",
             "{artifact_dir}",
         ],
-        "health": {
-            "path": "/health",
-            "timeout_seconds": timeout,
-            "interval_seconds": 0.05,
-        },
+        "health": {"path": "/health", "interval_seconds": 0.05},
     }
+    if timeout is not None:
+        manifest["backend"]["health"]["timeout_seconds"] = timeout
     manifest_path.write_text(json.dumps(manifest))
     return directory
+
+
+async def _why_not_ready(
+    manager: CanvasExtensionBackendManager, *statuses: BackendStatus
+) -> str:
+    """Failure message for a start that did not reach ``ready``.
+
+    The detail tells an exit from a health timeout. The backend's output tells
+    where a timed-out start spent its time: without ``backend-ready`` the
+    interpreter never got through its launch and imports; with it, the time went
+    to binding the server (``HTTPServer`` looks up its own name before it
+    listens) or the probe never reached it.
+    """
+    logs = await manager.logs(statuses[0].name, 4096)
+    states = ", ".join(f"{status.state} ({status.detail})" for status in statuses)
+    return f"start gave {states}; backend output: {logs.logs!r}"
 
 
 @pytest.mark.asyncio
@@ -134,7 +159,9 @@ async def test_prepare_start_logs_stop_and_preserve_data(
         manager.start("my-extension", revision),
         manager.start("my-extension", revision),
     )
-    assert first.state == second.state == "ready"
+    assert first.state == second.state == "ready", await _why_not_ready(
+        manager, first, second
+    )
     assert first.pid == second.pid
     assert manager.ready_endpoint("my-extension") == ("127.0.0.1", first.port)
 
@@ -154,7 +181,7 @@ async def test_prepare_start_logs_stop_and_preserve_data(
     assert runtime_file.is_file()
 
     restarted = await manager.start("my-extension", revision)
-    assert restarted.state == "ready"
+    assert restarted.state == "ready", await _why_not_ready(manager, restarted)
     await manager.shutdown()
     assert (await manager.status("my-extension")).state == "stopped"
 
@@ -368,7 +395,8 @@ async def test_stop_kills_sigterm_ignoring_descendant(tmp_path: Path):
     revision = manager.revision("my-extension")
     assert revision is not None
     await manager.prepare("my-extension", revision)
-    assert (await manager.start("my-extension", revision)).state == "ready"
+    started = await manager.start("my-extension", revision)
+    assert started.state == "ready", await _why_not_ready(manager, started)
     child_pid = int((manager.data_dir / "my-extension" / "child").read_text())
     assert (await manager.stop("my-extension")).state == "stopped"
     with pytest.raises(ProcessLookupError):
@@ -431,7 +459,7 @@ def test_backend_http_lifecycle_and_data_deletion(
             "/canvas-extensions/installed/my-extension/backend/start",
             json={"revision": revision},
         )
-        assert started.json()["state"] == "ready"
+        assert started.json()["state"] == "ready", started.json()
         assert (
             client.get(
                 "/canvas-extensions/installed/my-extension/backend/logs",
@@ -496,7 +524,37 @@ async def test_a_backend_becomes_ready_with_a_proxy_configured(
     started = await manager.start("my-extension", revision)
 
     try:
-        assert started.state == "ready", started.detail
+        assert started.state == "ready", await _why_not_ready(manager, started)
+    finally:
+        await manager.shutdown()
+
+
+# The first backend launched on a fresh macOS runner took about 3s to answer its
+# health probe (a cold /usr/bin/python3). A backend that slow must still start.
+_SLOW_LAUNCH_SECONDS = 3.5
+
+
+@pytest.mark.asyncio
+async def test_a_backend_slow_to_launch_becomes_ready_within_the_default_budget(
+    tmp_path: Path,
+):
+    source = _write_backend_extension(
+        tmp_path / "source" / "my-extension", launch_delay=_SLOW_LAUNCH_SECONDS
+    )
+    installed_dir = tmp_path / "installed"
+    install_canvas_extension(str(source), installed_dir=installed_dir)
+    manager = CanvasExtensionBackendManager(installed_dir, tmp_path / "state")
+    revision = manager.revision("my-extension")
+    assert revision is not None
+    await manager.prepare("my-extension", revision)
+
+    started_at = time.monotonic()
+    started = await manager.start("my-extension", revision)
+    elapsed = time.monotonic() - started_at
+
+    try:
+        assert started.state == "ready", await _why_not_ready(manager, started)
+        assert elapsed >= _SLOW_LAUNCH_SECONDS
     finally:
         await manager.shutdown()
 
@@ -556,7 +614,8 @@ async def test_stop_completes_when_macos_refuses_to_signal_the_exited_group(
     revision = manager.revision("my-extension")
     assert revision is not None
     await manager.prepare("my-extension", revision)
-    assert (await manager.start("my-extension", revision)).state == "ready"
+    started = await manager.start("my-extension", revision)
+    assert started.state == "ready", await _why_not_ready(manager, started)
     runtime_file = manager.data_dir / "my-extension" / "runtime.json"
     child_pid = json.loads(runtime_file.read_text())["child_pid"]
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
