@@ -451,5 +451,6 @@ describe('ACPSessionControlsEvent', () => {
       available_commands: controlsEvent.available_commands,
       config_options: [],
     });
+    expect(acpSessionControlsOf([])).toEqual({ available_commands: [], config_options: [] });
   });
 });

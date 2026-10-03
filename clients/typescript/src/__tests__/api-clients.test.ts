@@ -2027,16 +2027,6 @@ describe('Auxiliary API clients', () => {
       });
     });
 
-    it('ConversationClient.getAcpSessionControls is empty before the agent reported anything', async () => {
-      respond({ items: [] });
-
-      const current = await new ConversationClient({
-        host: 'http://example.com',
-      }).getAcpSessionControls('conversation-1');
-
-      expect(current).toEqual({ available_commands: [], config_options: [] });
-    });
-
     it('RemoteConversation sets an option and reads the newest controls of its conversation', async () => {
       const agent = new Agent({ llm: { model: 'gpt-4o', api_key: 'k' } });
       const workspace = new RemoteWorkspace({ host: 'http://example.com', workingDir: '/tmp' });
