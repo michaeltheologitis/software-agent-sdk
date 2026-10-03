@@ -78,6 +78,7 @@ from acp.schema import (
 from acp.transports import default_environment
 from pydantic import (
     AfterValidator,
+    BaseModel,
     Field,
     PrivateAttr,
     SecretStr,
@@ -97,8 +98,6 @@ from openhands.sdk.agent.acp_file_credentials import (
     write_secret_file,
 )
 from openhands.sdk.agent.acp_models import (
-    ACPAvailableCommand,
-    ACPConfigOption,
     ACPModelInfo,
     ACPSessionControls,
 )
@@ -1535,43 +1534,30 @@ class _OpenHandsACPBridge:
             raise self._masking_error
 
     def record_available_commands(
-        self,
-        session_id: str,
-        commands: Sequence[Any],
+        self, session_id: str, commands: Sequence[Any]
     ) -> None:
         """Mask, normalize and store a session's commands; then notify."""
         parsed = ACPSessionControls.parse_commands(commands)
-        masked = self._mask_value([command.model_dump() for command in parsed])
-        self._session_controls[session_id] = self.session_controls(
-            session_id
-        ).model_copy(
-            update={
-                "available_commands": [
-                    ACPAvailableCommand.model_validate(command) for command in masked
-                ]
-            }
-        )
+        self._store_session_controls(session_id, "available_commands", parsed)
         self._commands_reported.setdefault(session_id, threading.Event()).set()
         self._notify_session_controls_changed()
 
-    def record_config_options(
-        self,
-        session_id: str,
-        options: Sequence[Any],
-    ) -> None:
+    def record_config_options(self, session_id: str, options: Sequence[Any]) -> None:
         """Mask, normalize and store a session's config options; then notify."""
         parsed = ACPSessionControls.parse_config_options(options)
-        masked = self._mask_value([option.model_dump() for option in parsed])
-        self._session_controls[session_id] = self.session_controls(
-            session_id
-        ).model_copy(
-            update={
-                "config_options": [
-                    ACPConfigOption.model_validate(option) for option in masked
-                ]
-            }
-        )
+        self._store_session_controls(session_id, "config_options", parsed)
         self._notify_session_controls_changed()
+
+    def _store_session_controls(
+        self,
+        session_id: str,
+        field: Literal["available_commands", "config_options"],
+        entries: Sequence[BaseModel],
+    ) -> None:
+        """Replace one list of the session's snapshot with ``entries``, masked."""
+        snapshot = self.session_controls(session_id).model_dump()
+        snapshot[field] = self._mask_value([entry.model_dump() for entry in entries])
+        self._session_controls[session_id] = ACPSessionControls.model_validate(snapshot)
 
     def session_controls(self, session_id: str) -> ACPSessionControls:
         """The session's latest snapshot; empty if it has reported nothing."""
