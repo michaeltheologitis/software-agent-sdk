@@ -88,8 +88,7 @@ class Server:
 
     async def start_and_run(self, **payload: Any) -> UUID:
         conversation_id = await self.start(
-            initial_message={"content": [{"type": "text", "text": "hello"}]},
-            **payload,
+            initial_message={"content": [{"type": "text", "text": "hello"}]}, **payload
         )
         event_service = await self.service.get_event_service(conversation_id)
         assert event_service is not None
@@ -322,8 +321,7 @@ async def test_the_preview_is_unavailable_in_the_docker_runtime(tmp_path, stores
 
 async def test_the_start_folds_option_values_into_the_agent_only(server):
     conversation_id = await server.start(
-        agent_settings=scripted_settings(),
-        acp_config_options={"profile": "thorough"},
+        agent_settings=scripted_settings(), acp_config_options={"profile": "thorough"}
     )
 
     conversation_dir = server.root / "conversations" / conversation_id.hex

@@ -96,9 +96,7 @@ def acp_request_log(
 
 
 @pytest.fixture
-def scripted_conversation(
-    tmp_path: Path,
-) -> Iterator[Callable[..., LocalConversation]]:
+def scripted_conversation(tmp_path: Path) -> Iterator[Callable[..., LocalConversation]]:
     """Make LocalConversations on the scripted ACP agent; each is closed after.
 
     ``flags`` go to the agent's command and ``agent_fields`` to its ACPAgent.

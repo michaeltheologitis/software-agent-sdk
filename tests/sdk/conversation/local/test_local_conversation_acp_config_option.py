@@ -12,11 +12,7 @@ import pytest
 from acp.schema import AvailableCommand
 
 from openhands.sdk.agent.acp_agent import ACPAgent, ACPConfigOptionRejectedError
-from openhands.sdk.event import (
-    ACPSessionControlsEvent,
-    ActionEvent,
-    PauseEvent,
-)
+from openhands.sdk.event import ACPSessionControlsEvent, ActionEvent, PauseEvent
 from tests.conftest import controls_events, wait_until
 
 

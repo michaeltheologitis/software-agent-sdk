@@ -9,10 +9,7 @@ from openhands.sdk.agent.acp_models import (
     ACPConfigOptionValue,
     ACPSessionControls,
 )
-from openhands.sdk.event import (
-    ACPSessionControlsEvent,
-    Event,
-)
+from openhands.sdk.event import ACPSessionControlsEvent, Event
 
 
 CONTROLS = ACPSessionControls(
