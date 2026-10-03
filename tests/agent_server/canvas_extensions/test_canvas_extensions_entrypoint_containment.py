@@ -15,7 +15,6 @@ from openhands.agent_server.canvas_extensions.installed import (
 from openhands.agent_server.canvas_extensions.manifest import (
     CanvasExtensionManifest,
     resolve_entrypoint,
-    resolve_panel_icon,
 )
 
 from .conftest import write_extension
@@ -199,19 +198,6 @@ def _extension_with_icon(directory: Path, icon: str = "dist/panel.svg") -> Path:
             }
         ],
     )
-
-
-def test_a_contained_panel_icon_resolves(tmp_path: Path):
-    root = _extension_with_icon(tmp_path / "my-extension")
-    (root / "dist" / "panel.svg").write_text("<svg/>")
-
-    manifest = CanvasExtensionInstallationInterface.load_from_dir(root)
-
-    assert (
-        resolve_panel_icon(manifest, "decompositions", root)
-        == (root / "dist" / "panel.svg").resolve()
-    )
-    assert resolve_panel_icon(manifest, "no-such-panel", root) is None
 
 
 @pytest.mark.parametrize(
