@@ -1793,9 +1793,7 @@ class LocalConversation(BaseConversation):
             }
 
     def set_acp_config_option(
-        self,
-        config_id: str,
-        value: str | bool,
+        self, config_id: str, value: str | bool
     ) -> ACPSessionControls | None:
         """Set an ACP session config option, live or for the session's start.
 

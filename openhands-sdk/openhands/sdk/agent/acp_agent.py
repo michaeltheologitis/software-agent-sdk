@@ -590,12 +590,7 @@ class ACPConfigOptionRejectedError(ValueError):
     ``str()`` is the server's own message, masked.
     """
 
-    def __init__(
-        self,
-        config_id: str,
-        value: str | bool,
-        message: str,
-    ) -> None:
+    def __init__(self, config_id: str, value: str | bool, message: str) -> None:
         super().__init__(message)
         self.config_id = config_id
         self.value = value
@@ -1561,11 +1556,7 @@ class _OpenHandsACPBridge:
         """The session's latest snapshot; empty if it has reported nothing."""
         return self._session_controls.get(session_id) or ACPSessionControls()
 
-    def wait_for_available_commands(
-        self,
-        session_id: str,
-        timeout: float,
-    ) -> bool:
+    def wait_for_available_commands(self, session_id: str, timeout: float) -> bool:
         """Block until the session has reported commands once, or the timeout."""
         reported = self._commands_reported.setdefault(session_id, threading.Event())
         return reported.wait(timeout)
@@ -4782,9 +4773,7 @@ class ACPAgent(AgentBase):
         )
 
     def set_acp_config_option(
-        self,
-        config_id: str,
-        value: str | bool,
+        self, config_id: str, value: str | bool
     ) -> ACPSessionControls:
         """Set one option on the live session; return the resulting controls.
 
@@ -4837,8 +4826,7 @@ class ACPAgent(AgentBase):
         assert self._session_id is not None
         try:
             self._executor.run_async(
-                self._conn.close_session(session_id=self._session_id),
-                timeout=timeout,
+                self._conn.close_session(session_id=self._session_id), timeout=timeout
             )
         except Exception as e:
             logger.debug("ACP session/close failed: %s", e)

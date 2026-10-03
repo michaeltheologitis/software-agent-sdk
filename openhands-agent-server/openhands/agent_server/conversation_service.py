@@ -1845,8 +1845,7 @@ class ConversationService:
         return conversation_info, True
 
     async def _resolve_launch(
-        self,
-        request: StartConversationRequest,
+        self, request: StartConversationRequest
     ) -> tuple[StartConversationRequest, LaunchedAgentProfile | None]:
         """Resolve the request's agent as its launch will run it.
 
@@ -1960,8 +1959,7 @@ class ConversationService:
         return request, launched_agent_profile
 
     async def preview_acp_session(
-        self,
-        request: StartConversationRequest,
+        self, request: StartConversationRequest
     ) -> ACPSessionControls:
         """What an ACP agent would offer for this start request, before it exists.
 

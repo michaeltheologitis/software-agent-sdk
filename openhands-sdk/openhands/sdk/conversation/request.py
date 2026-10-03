@@ -21,10 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-from openhands.sdk.agent.acp_agent import (
-    ACPAgent as ACPAgent,
-    ACPConfigOptionValues,
-)
+from openhands.sdk.agent.acp_agent import ACPAgent as ACPAgent, ACPConfigOptionValues
 from openhands.sdk.agent.agent import Agent as Agent
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.types import (

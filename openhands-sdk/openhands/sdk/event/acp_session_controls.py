@@ -24,12 +24,10 @@ class ACPSessionControlsEvent(Event):
 
     source: SourceType = "agent"
     available_commands: list[ACPAvailableCommand] = Field(
-        default_factory=list,
-        description="The agent's slash commands.",
+        default_factory=list, description="The agent's slash commands."
     )
     config_options: list[ACPConfigOption] = Field(
-        default_factory=list,
-        description="The agent's session config options.",
+        default_factory=list, description="The agent's session config options."
     )
 
     @classmethod
