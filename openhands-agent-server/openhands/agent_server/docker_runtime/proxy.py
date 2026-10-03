@@ -79,11 +79,6 @@ def strip_auth_query(path: str) -> str:
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
-def _is_loopback_host(host: str | None) -> bool:
-    """127.0.0.1, ::1 or localhost: targets that must never be proxied."""
-    return host in _LOOPBACK_HOSTS
-
-
 async def proxy_http(
     request: Request,
     workspace: ProxyTarget,
@@ -148,7 +143,7 @@ async def proxy_http(
                 timeout=httpx.Timeout(
                     connect=10.0, read=timeout, write=30.0, pool=10.0
                 ),
-                trust_env=not _is_loopback_host(urlsplit(url).hostname),
+                trust_env=urlsplit(url).hostname not in _LOOPBACK_HOSTS,
             )
         )
         upstream = await stack.enter_async_context(
@@ -224,7 +219,7 @@ async def bridge_websocket(
         async with websockets.connect(
             upstream_url,
             additional_headers=upstream_headers or None,
-            proxy=None if _is_loopback_host(urlsplit(upstream_url).hostname) else True,
+            proxy=None if urlsplit(upstream_url).hostname in _LOOPBACK_HOSTS else True,
         ) as upstream_ws:
             await _bridge_websocket_loop(client_ws, upstream_ws)
     except websockets.exceptions.InvalidStatus as exc:
