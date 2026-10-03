@@ -9,10 +9,16 @@ from pathlib import Path
 
 import pytest
 
+from openhands.agent_server.canvas_extensions.installed import (
+    CanvasExtensionInstallationInterface,
+)
 from openhands.agent_server.canvas_extensions.manifest import (
     CanvasExtensionManifest,
     resolve_entrypoint,
+    resolve_panel_icon,
 )
+
+from .conftest import write_extension
 
 
 def _manifest_with_raw_entrypoint(entrypoint: str) -> CanvasExtensionManifest:
@@ -176,3 +182,56 @@ def test_rejects_symlink_cycle(package_root: Path):
     manifest = _manifest_with_raw_entrypoint("index.js")
     with pytest.raises(ValueError, match="does not resolve to a file"):
         resolve_entrypoint(manifest, package_root)
+
+
+# -- Panel icons ---------------------------------------------------------------
+
+
+def _extension_with_icon(directory: Path, icon: str = "dist/panel.svg") -> Path:
+    return write_extension(
+        directory,
+        conversation_panels=[
+            {
+                "id": "decompositions",
+                "title": "Decompositions",
+                "icon": icon,
+                "tabs": [{"id": "browse", "title": "Browse"}],
+            }
+        ],
+    )
+
+
+def test_a_contained_panel_icon_resolves(tmp_path: Path):
+    root = _extension_with_icon(tmp_path / "my-extension")
+    (root / "dist" / "panel.svg").write_text("<svg/>")
+
+    manifest = CanvasExtensionInstallationInterface.load_from_dir(root)
+
+    assert (
+        resolve_panel_icon(manifest, "decompositions", root)
+        == (root / "dist" / "panel.svg").resolve()
+    )
+    assert resolve_panel_icon(manifest, "no-such-panel", root) is None
+
+
+@pytest.mark.parametrize(
+    "make_icon",
+    ["symlink-outside", "missing", "directory", "symlink-to-other-type"],
+)
+def test_an_icon_that_is_not_a_contained_image_makes_the_install_invalid(
+    tmp_path: Path, make_icon: str
+):
+    root = _extension_with_icon(tmp_path / "my-extension")
+    icon = root / "dist" / "panel.svg"
+    if make_icon == "symlink-outside":
+        outside = tmp_path / "outside.svg"
+        outside.write_text("<svg/>")
+        icon.symlink_to(outside)
+    elif make_icon == "directory":
+        icon.mkdir()
+    elif make_icon == "symlink-to-other-type":
+        (root / "dist" / "blob").write_text("<svg/>")
+        icon.symlink_to(root / "dist" / "blob")
+
+    with pytest.raises(ValueError, match="panel icon"):
+        CanvasExtensionInstallationInterface.load_from_dir(root)
