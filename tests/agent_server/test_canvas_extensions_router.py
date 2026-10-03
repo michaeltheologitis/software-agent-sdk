@@ -538,3 +538,127 @@ def test_install_rejects_repo_path_escaping_the_source(
 
     assert install.status_code == 400
     assert "escapes" in install.json()["detail"]
+
+
+# -- Conversation panels -------------------------------------------------------
+
+PANEL = {
+    "id": "decompositions",
+    "title": "Decompositions",
+    "icon": "dist/panel.svg",
+    "tabs": [
+        {"id": "browse", "title": "Decompositions", "path": "/"},
+        {"id": "create", "title": "Create decomposition", "path": "/create"},
+    ],
+}
+
+
+def _install_with_panel(
+    client: TestClient, tmp_path: Path, panel: dict = PANEL, icon_bytes: bytes = b""
+) -> Path:
+    src = write_extension(
+        tmp_path / "src" / "demo-extension",
+        name="demo-extension",
+        conversation_panels=[panel],
+    )
+    if panel.get("icon"):
+        (src / panel["icon"]).write_bytes(icon_bytes or b"<svg/>")
+    response = client.post("/canvas-extensions/install", json={"source": str(src)})
+    assert response.status_code == 200, response.text
+    return src
+
+
+def test_list_and_get_return_the_conversation_panels(
+    client: TestClient, tmp_path: Path
+):
+    _install_with_panel(client, tmp_path)
+
+    [listed] = client.get("/canvas-extensions/installed").json()["canvas_extensions"]
+    got = client.get("/canvas-extensions/installed/demo-extension").json()
+
+    assert listed["manifest"]["contributes"]["conversation_panels"] == [PANEL]
+    assert got["manifest"]["contributes"]["conversation_panels"] == [PANEL]
+
+
+@pytest.mark.parametrize(
+    "icon, body, media_type",
+    [
+        (
+            "dist/panel.svg",
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+            "image/svg+xml",
+        ),
+        ("dist/panel.png", b"\x89PNG\r\n\x1a\n", "image/png"),
+    ],
+)
+def test_the_icon_route_serves_the_icon_with_its_type_and_safe_headers(
+    client: TestClient, tmp_path: Path, icon: str, body: bytes, media_type: str
+):
+    _install_with_panel(client, tmp_path, {**PANEL, "icon": icon}, body)
+
+    response = client.get(
+        "/canvas-extensions/installed/demo-extension/panels/decompositions/icon"
+    )
+
+    assert response.status_code == 200
+    assert response.content == body
+    assert response.headers["content-type"].startswith(media_type)
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == (
+        "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    )
+
+
+@pytest.mark.parametrize(
+    "extension, panel_id",
+    [("ghost", "decompositions"), ("demo-extension", "no-such-panel")],
+    ids=["unknown-extension", "unknown-panel"],
+)
+def test_the_icon_route_is_not_found_for_unknown_names(
+    client: TestClient, tmp_path: Path, extension: str, panel_id: str
+):
+    _install_with_panel(client, tmp_path)
+
+    response = client.get(
+        f"/canvas-extensions/installed/{extension}/panels/{panel_id}/icon"
+    )
+
+    assert response.status_code == 404
+
+
+def test_the_icon_route_is_not_found_for_a_panel_without_an_icon(
+    client: TestClient, tmp_path: Path
+):
+    _install_with_panel(client, tmp_path, {**PANEL, "icon": None})
+
+    response = client.get(
+        "/canvas-extensions/installed/demo-extension/panels/decompositions/icon"
+    )
+
+    assert response.status_code == 404
+
+
+def test_the_icon_route_rechecks_containment_on_every_request(
+    client: TestClient, tmp_path: Path
+):
+    _install_with_panel(client, tmp_path)
+    installed_icon = (
+        tmp_path / "installed-store" / "demo-extension" / "dist" / "panel.svg"
+    )
+    outside = tmp_path / "outside.svg"
+    outside.write_text("<svg>secret</svg>")
+    installed_icon.unlink()
+    installed_icon.symlink_to(outside)
+
+    response = client.get(
+        "/canvas-extensions/installed/demo-extension/panels/decompositions/icon"
+    )
+
+    assert response.status_code == 404
+
+
+def test_server_info_announces_conversation_panels():
+    from openhands.agent_server.server_details_router import build_server_info
+
+    assert "canvas_conversation_panels_v1" in build_server_info().capabilities

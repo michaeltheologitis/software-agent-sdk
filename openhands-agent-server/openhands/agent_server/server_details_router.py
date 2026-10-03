@@ -138,6 +138,7 @@ def build_server_info(
     )
     if app_backend_ingress_url:
         info.capabilities.append("canvas_app_backend_bridge_v1")
+    info.capabilities.append("canvas_conversation_panels_v1")
     return info
 
 
