@@ -38,7 +38,7 @@ from collections.abc import (
 )
 from concurrent.futures import Future
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from acp.client.connection import ClientSideConnection
 from acp.exceptions import RequestError as ACPRequestError
@@ -77,6 +77,7 @@ from acp.schema import (
 )
 from acp.transports import default_environment
 from pydantic import (
+    AfterValidator,
     Field,
     PrivateAttr,
     SecretStr,
@@ -609,6 +610,17 @@ def _check_config_option_id(config_id: str) -> None:
         raise ValueError(
             "The 'model' option is set with switch_acp_model, not as a config option."
         )
+
+
+def _check_config_option_ids(values: dict[str, str | bool]) -> dict[str, str | bool]:
+    for config_id in values:
+        _check_config_option_id(config_id)
+    return values
+
+
+ACPConfigOptionValues = Annotated[
+    dict[str, str | bool], AfterValidator(_check_config_option_ids)
+]
 
 
 async def _apply_config_options(
@@ -1961,7 +1973,7 @@ class ACPAgent(AgentBase):
             "set_session_model. If None, the server picks its default."
         ),
     )
-    acp_config_options: dict[str, str | bool] = Field(
+    acp_config_options: ACPConfigOptionValues = Field(
         default_factory=dict,
         description=(
             "Session config option values to set with session/set_config_option "
@@ -1970,17 +1982,6 @@ class ACPAgent(AgentBase):
             "acp_model, never here."
         ),
     )
-
-    @field_validator("acp_config_options")
-    @classmethod
-    def _reject_model_config_option(
-        cls,
-        value: dict[str, str | bool],
-    ) -> dict[str, str | bool]:
-        for config_id in value:
-            _check_config_option_id(config_id)
-        return value
-
     acp_resume_session_id: str | None = Field(
         default=None,
         description=(

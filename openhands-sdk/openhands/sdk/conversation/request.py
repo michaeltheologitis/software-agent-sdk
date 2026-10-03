@@ -18,13 +18,12 @@ from pydantic import (
     Field,
     Tag,
     field_serializer,
-    field_validator,
     model_validator,
 )
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent as ACPAgent,
-    _check_config_option_id,
+    ACPConfigOptionValues,
 )
 from openhands.sdk.agent.agent import Agent as Agent
 from openhands.sdk.agent.base import AgentBase
@@ -319,7 +318,7 @@ class StartConversationRequest(ConversationConfig):
         ),
     )
     agent: AgentBase = Field(default=cast(AgentBase, None))
-    acp_config_options: dict[str, str | bool] = Field(
+    acp_config_options: ACPConfigOptionValues = Field(
         default_factory=dict,
         description=(
             "ACP session config option values to apply after session/new and "
@@ -327,16 +326,6 @@ class StartConversationRequest(ConversationConfig):
             "folded into the agent, not stored with the conversation record."
         ),
     )
-
-    @field_validator("acp_config_options")
-    @classmethod
-    def _reject_model_config_option(
-        cls,
-        value: dict[str, str | bool],
-    ) -> dict[str, str | bool]:
-        for config_id in value:
-            _check_config_option_id(config_id)
-        return value
 
     @model_validator(mode="before")
     @classmethod

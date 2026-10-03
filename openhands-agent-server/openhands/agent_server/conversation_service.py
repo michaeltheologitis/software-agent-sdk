@@ -50,7 +50,6 @@ from openhands.agent_server.telemetry.sanitizer import model_family, safe_token
 from openhands.agent_server.utils import safe_rmtree, utc_now
 from openhands.sdk import LLM, AgentContext, Event, Message
 from openhands.sdk.agent import ACPAgent
-from openhands.sdk.agent.acp_agent import _check_config_option_id
 from openhands.sdk.agent.acp_file_credentials import CODEX_AUTH_SECRET_NAME
 from openhands.sdk.agent.acp_models import ACPSessionControls
 from openhands.sdk.agent.base import AgentBase
@@ -1949,9 +1948,6 @@ class ConversationService:
                 raise InvalidACPConfigOptions(
                     "acp_config_options requires an ACP agent"
                 )
-            # model_copy skips validators, so the model option is refused here.
-            for config_id in request.acp_config_options:
-                _check_config_option_id(config_id)
             agent = request.agent.model_copy(
                 update={
                     "acp_config_options": {
