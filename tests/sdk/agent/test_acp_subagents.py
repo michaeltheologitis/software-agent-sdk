@@ -25,7 +25,11 @@ from acp.client.connection import ClientSideConnection
 from acp.schema import ClientCapabilities, InitializeRequest, SessionNotification
 from acp.utils import serialize_params
 
-from openhands.sdk.agent.acp_agent import ACPAgent, _OpenHandsACPBridge
+from openhands.sdk.agent.acp_agent import (
+    ACPAgent,
+    _fingerprint_session_id,
+    _OpenHandsACPBridge,
+)
 from openhands.sdk.agent.acp_subagents import (
     ACPSessionNotCancellableError,
     ACPSessionNotFoundError,
@@ -289,7 +293,8 @@ async def test_child_is_never_reparented_nor_its_own_parent(wire, caplog):
     assert wire.latest("child-a").title == "Moved?"
     assert not wire.sessions.is_child("child-b")
     assert not wire.sessions.is_child(ROOT)
-    assert len(caplog.records) == 3
+    refusals = [r for r in caplog.records if r.name.endswith(".acp_subagents")]
+    assert len(refusals) == 3
 
 
 async def test_child_text_never_reaches_the_root_answer(wire):
@@ -631,6 +636,32 @@ async def test_unannounced_session_follows_the_root_path_with_one_warning(wire, 
     assert [e.acp_session_id for e in wire.turn] == [None]
     assert len(caplog.records) == 1
     assert "never announced" in caplog.records[0].getMessage()
+
+
+async def test_unstable_updates_on_an_unannounced_session_stay_under_that_session(
+    wire, caplog
+):
+    stranger = "stranger-session"
+    with caplog.at_level(logging.WARNING):
+        await wire.send(
+            stranger,
+            announce("child-x"),
+            message("task", stranger, "child-x", "Go."),
+        )
+
+    assert wire.latest("child-x").parent_session_id == stranger
+    [stored_message] = [
+        e for e in wire.emitted if isinstance(e, ACPSessionMessageEvent)
+    ]
+    assert stored_message.acp_session_id == stranger
+    assert (wire.bridge.accumulated_text, wire.bridge.accumulated_tool_calls) == (
+        [],
+        [],
+    )
+    assert wire.turn == []
+    [warning] = caplog.records
+    assert "never announced" in warning.getMessage()
+    assert _fingerprint_session_id(stranger) in warning.getMessage()
 
 
 # -- Through a conversation, against the scripted agent ---------------------------

@@ -1449,7 +1449,10 @@ class _OpenHandsACPBridge:
         self.subagents: ACPSubagentSessions | None = (
             ACPSubagentSessions(mask=self._mask_value) if subagents else None
         )
+        # Sessions neither the root nor announced, warned about once per path:
+        # stable updates follow the root's, unstable ones keep their session.
         self._unannounced_sessions: set[str] = set()
+        self._unannounced_unstable_sessions: set[str] = set()
         # The conversation's emitter (ACPAgent._on_session_event), set per
         # connection; every child event goes through it.
         self.on_session_event: Callable[[Event], None] | None = None
@@ -1623,6 +1626,7 @@ class _OpenHandsACPBridge:
         self._last_activity_monotonic = time.monotonic()
         if self.subagents is None or session_id == self._fork_session_id:
             return
+        self._warn_once_for_unannounced_unstable_traffic(session_id)
         if isinstance(update, SubagentUpdate):
             events = self.subagents.on_subagent_update(session_id, update)
         elif isinstance(update, SessionMessage):
@@ -1631,6 +1635,25 @@ class _OpenHandsACPBridge:
             events = self.subagents.on_session_message_chunk(session_id, update)
         self.emit_subagent_events(events)
         self._maybe_signal_activity()
+
+    def _warn_once_for_unannounced_unstable_traffic(self, session_id: str) -> None:
+        """Warn once for a session that is neither the root nor an announced
+        child: its unstable updates stay under its own id, so a child it
+        announces cannot be placed."""
+        subagents = self.subagents
+        assert subagents is not None
+        if (
+            session_id == subagents.root_session_id
+            or subagents.is_child(session_id)
+            or session_id in self._unannounced_unstable_sessions
+        ):
+            return
+        self._unannounced_unstable_sessions.add(session_id)
+        logger.warning(
+            "ACP session %s was never announced as a sub-agent; "
+            "keeping its sub-agent updates under its own id",
+            _fingerprint_session_id(session_id),
+        )
 
     def emit_subagent_events(self, events: Sequence[Event]) -> None:
         """Submit each event to ``on_session_event``, in order; drop them while
