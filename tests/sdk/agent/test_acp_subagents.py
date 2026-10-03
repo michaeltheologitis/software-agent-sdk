@@ -928,6 +928,21 @@ def test_cancel_acp_session_does_not_wait_for_the_state_lock(conversation):
     assert conv.state.execution_status == ConversationExecutionStatus.FINISHED
 
 
+def test_cancel_acp_session_for_an_idle_child_that_keeps_its_grant_is_sent(
+    conversation, acp_request_log
+):
+    conv = conversation("--subagents")
+    run(conv)
+    idle_with_grant = wait_until(lambda: turned_idle(conv, "child-b"))
+    assert idle_with_grant.cancellable
+
+    conv.cancel_acp_session("child-b")
+
+    cancel = {"method": "session/cancel", "params": {"sessionId": "child-b"}}
+    wait_until(lambda: cancel in acp_request_log())
+    assert latest(list(conv.state.events), "child-b") == idle_with_grant
+
+
 def test_cancel_acp_session_refuses_a_child_without_a_grant(
     conversation, acp_request_log
 ):
