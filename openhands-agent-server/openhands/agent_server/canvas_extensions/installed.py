@@ -252,9 +252,7 @@ def get_canvas_extension_bundle_path(
 
 
 def get_canvas_extension_panel_icon_path(
-    name: str,
-    panel_id: str,
-    installed_dir: Path | None = None,
+    name: str, panel_id: str, installed_dir: Path | None = None
 ) -> Path | None:
     """Re-validated icon path for a serve; None if anything is missing or invalid.
 

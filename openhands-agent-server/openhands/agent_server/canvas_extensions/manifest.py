@@ -80,10 +80,7 @@ class CanvasExtensionPanelTab(BaseModel):
     id: ContributionId = Field(
         description="Contribution id; the id the App registers this tab's page under",
     )
-    title: str = Field(
-        min_length=1,
-        description="Tab label in the panel's tab row",
-    )
+    title: str = Field(min_length=1, description="Tab label in the panel's tab row")
     path: str = Field(
         default="/",
         description="Where the tab's page starts inside the panel; '/' is its root",
@@ -103,20 +100,16 @@ class CanvasExtensionPanelTab(BaseModel):
 class CanvasExtensionConversationPanel(BaseModel):
     """A panel opened from a button in the conversation header."""
 
-    id: ContributionId = Field(
-        description="Contribution id of the panel",
-    )
+    id: ContributionId = Field(description="Contribution id of the panel")
     title: str = Field(
         min_length=1,
         description="Panel title; the header button's tooltip is 'Show' and this",
     )
     icon: str | None = Field(
-        default=None,
-        description="Package-relative .svg or .png for the header button",
+        default=None, description="Package-relative .svg or .png for the header button"
     )
     tabs: list[CanvasExtensionPanelTab] = Field(
-        min_length=1,
-        description="The panel's tabs, in tab-row order",
+        min_length=1, description="The panel's tabs, in tab-row order"
     )
 
     @field_validator("icon")
@@ -366,9 +359,7 @@ def resolve_package_file(package_root: Path, relative: str, what: str) -> Path:
 
 
 def resolve_panel_icon(
-    manifest: CanvasExtensionManifest,
-    panel_id: str,
-    package_root: Path,
+    manifest: CanvasExtensionManifest, panel_id: str, package_root: Path
 ) -> Path | None:
     """The contained icon file of a panel; None for no such panel or no icon.
 

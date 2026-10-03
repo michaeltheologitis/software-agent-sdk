@@ -470,8 +470,7 @@ def get_canvas_extension_bundle_endpoint(
     },
 )
 def get_canvas_extension_panel_icon_endpoint(
-    extension_name: CanvasExtensionNamePath,
-    panel_id: CanvasExtensionContributionIdPath,
+    extension_name: CanvasExtensionNamePath, panel_id: CanvasExtensionContributionIdPath
 ) -> FileResponse:
     """Serve a conversation panel's icon, re-validating containment.
 
