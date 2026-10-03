@@ -182,7 +182,7 @@ _ACP_CANCEL_DRAIN_TIMEOUT: float = float(
 
 _ACP_AUTH_TIMEOUT: float = float(os.environ.get("ACP_AUTH_TIMEOUT", "30.0"))
 # Bound for one session/set_config_option round-trip. Shorter than the prompt
-# timeout: the call holds the conversation lock and answers a click in a picker.
+# timeout: the call holds the conversation lock while a user waits on it.
 _ACP_CONFIG_OPTION_TIMEOUT: float = float(
     os.environ.get("ACP_CONFIG_OPTION_TIMEOUT", "30.0")
 )
@@ -587,7 +587,7 @@ _CODEX_REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
 class ACPConfigOptionRejectedError(ValueError):
     """The ACP server refused a session/set_config_option.
 
-    ``str()`` is the server's own message, masked; clients show it as it is.
+    ``str()`` is the server's own message, masked.
     """
 
     def __init__(
@@ -630,9 +630,7 @@ async def _apply_config_options(
     on_config_options: Callable[[str, Sequence[Any]], None],
     mask: Callable[[Any], Any],
 ) -> None:
-    """Set each value in order, recording every response.
-
-    Every response is recorded, because setting one option may change others.
+    """Set each value in order, recording every response: one may change others.
 
     Raises:
         ACPConfigOptionRejectedError: The server refused a value (any
@@ -1439,7 +1437,7 @@ class _OpenHandsACPBridge:
         # thread can keep the one it got. Written only on the portal thread.
         self._session_controls: dict[str, ACPSessionControls] = {}
         self._commands_reported: dict[str, threading.Event] = {}
-        # Bound by ACPAgent to publish the root session's controls.
+        # Called after every recorded change.
         self.on_session_controls_changed: Callable[[], None] | None = None
 
     def reset(self) -> None:
@@ -2170,8 +2168,8 @@ class ACPAgent(AgentBase):
         default_factory=set
     )
     _atexit_callback: Callable[[], None] | None = PrivateAttr(default=None)
-    # Where the root session's commands and options are published (bound by
-    # LocalConversation), and the ordering state of _publish_session_controls.
+    # The sink for the root session's controls (None publishes nothing), and the
+    # ordering state of _publish_session_controls.
     _on_session_event: Callable[[Event], None] | None = PrivateAttr(default=None)
     _session_controls_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _published_session_controls: ACPSessionControls | None = PrivateAttr(default=None)
@@ -4790,8 +4788,7 @@ class ACPAgent(AgentBase):
     ) -> ACPSessionControls:
         """Set one option on the live session; return the resulting controls.
 
-        The low-level primitive: :meth:`LocalConversation.set_acp_config_option`
-        also persists the value on the agent.
+        Only the session changes; ``acp_config_options`` keeps its values.
 
         Raises:
             ValueError: ``config_id`` is empty or ``"model"``.

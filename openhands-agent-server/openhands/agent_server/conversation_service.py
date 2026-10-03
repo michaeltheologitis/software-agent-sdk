@@ -1848,7 +1848,7 @@ class ConversationService:
         self,
         request: StartConversationRequest,
     ) -> tuple[StartConversationRequest, LaunchedAgentProfile | None]:
-        """The agent-resolution steps shared by a start and a preview.
+        """Resolve the request's agent as its launch will run it.
 
         Settings, profile resolution and its secret allow-list, load_memory,
         ACP skill sourcing and launch additions, then the acp_config_options
