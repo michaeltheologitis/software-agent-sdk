@@ -5,10 +5,12 @@ import copy
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from typing import Any, Final, TypeGuard, cast
 
-from openhands.sdk.agent.acp_agent import ACPAgent
+from openhands.sdk.agent.acp_agent import ACPAgent, _check_config_option_id
+from openhands.sdk.agent.acp_models import ACPSessionControls
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.agent.stream_context import StreamProgressCallbackType
 from openhands.sdk.context.condenser import CondenserBase, LLMSummarizingCondenser
@@ -315,6 +317,11 @@ class LocalConversation(BaseConversation):
         self._arun_task = None
         self._cancel_token = None
         self._step_holds_state_lock = False
+        # One worker, so events emitted from any thread are persisted in the
+        # order they were submitted. Its thread starts on the first submit.
+        self._event_emitter = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="conversation-events"
+        )
 
         # Store plugin specs for lazy loading (no IO in constructor)
         # Plugins will be loaded on first run() or send_message() call
@@ -1567,6 +1574,8 @@ class LocalConversation(BaseConversation):
             self._register_file_based_agents()
 
             runtime_mcp_tools: list[ToolDefinition] = []
+            if isinstance(self.agent, ACPAgent):
+                self.agent._on_session_event = self._emit_event_from_any_thread
             try:
                 if self.agent.supports_openhands_tools:
                     self.agent._initialize(self._state)
@@ -1769,25 +1778,7 @@ class LocalConversation(BaseConversation):
             #      and the resumed session model from ``acp_model`` on reload, so
             #      it must hold the switched value, not the construction-time one.
             #
-            # model_copy is shallow, so a live copy shares the ACP runtime
-            # (_conn/_executor/_process) with the old agent. Disarm the old
-            # agent's finalizer before dropping it: otherwise ACPAgent.__del__
-            # -> close() on the discarded agent would tear down the session the
-            # copy now owns, leaving the next turn pointing at a dead connection.
-            # Pre-session there is no runtime to hand off, so release_runtime is
-            # unnecessary (the discarded agent's close() is already a no-op).
-            old_agent = self.agent
-            new_agent = old_agent.model_copy(update={"acp_model": model})
-            if live:
-                new_agent._register_atexit_cleanup(replace=True)
-                new_agent._bind_file_credential_masking()
-                old_agent.release_runtime()
-            # ``self.agent`` is the live reference used by subsequent ``step()``
-            # calls; ``self._state.agent`` is what the autosave path serializes
-            # to base_state.json. Update both so the running conversation and the
-            # persisted state agree on the switched model.
-            self.agent = new_agent
-            self._state.agent = new_agent
+            self._replace_acp_agent({"acp_model": model}, live=live)
             # Keep the persisted model hint in sync with the switch. The live
             # agent's ``current_model_id`` (a PrivateAttr) already reflects the
             # new model and wins on warm reads, but cold list reads after a
@@ -1800,6 +1791,87 @@ class LocalConversation(BaseConversation):
                 **self._state.agent_state,
                 "acp_current_model_id": model,
             }
+
+    def set_acp_config_option(
+        self,
+        config_id: str,
+        value: str | bool,
+    ) -> ACPSessionControls | None:
+        """Set an ACP session config option, live or for the session's start.
+
+        Live: issues session/set_config_option and returns the resulting
+        controls. Not yet started: returns None and the value is applied after
+        session/new. Either way the value is persisted on the agent.
+
+        Raises:
+            ValueError: Not an ACP conversation, or ``config_id`` is empty or
+                ``"model"``.
+            ACPConfigOptionRejectedError: The server refused the value.
+            TimeoutError: No answer within ``ACP_CONFIG_OPTION_TIMEOUT``.
+        """
+        if not isinstance(self.agent, ACPAgent):
+            raise ValueError(
+                "set_acp_config_option is only supported for ACP conversations."
+            )
+        _check_config_option_id(config_id)
+        with self._state:
+            live = self.agent.has_live_acp_session
+            # A refusal propagates from the live call before anything is written.
+            controls = (
+                self.agent.set_acp_config_option(config_id, value) if live else None
+            )
+            self._replace_acp_agent(
+                {
+                    "acp_config_options": {
+                        **self.agent.acp_config_options,
+                        config_id: value,
+                    }
+                },
+                live=live,
+            )
+        return controls
+
+    def _replace_acp_agent(
+        self,
+        update: dict[str, Any],
+        *,
+        live: bool,
+    ) -> None:
+        """Swap in ``agent.model_copy(update=update)``, handing over the runtime.
+
+        ACPAgent fields are frozen, so a changed value is persisted by replacing
+        the agent; a fresh object identity also makes autosave write
+        base_state.json. The copy is shallow, so a live copy shares the ACP
+        runtime (connection, executor, process) with the old agent: the copy
+        takes over the atexit cleanup, file-credential masking and the bridge's
+        session-controls publishing, and the old agent's finalizer is disarmed so
+        dropping it cannot tear down the session the copy now owns. Before a
+        session exists there is no runtime to hand off.
+        """
+        old_agent = self.agent
+        assert isinstance(old_agent, ACPAgent)
+        new_agent = old_agent.model_copy(update=update)
+        if live:
+            new_agent._register_atexit_cleanup(replace=True)
+            new_agent._bind_file_credential_masking()
+            new_agent._bind_session_controls()
+            old_agent.release_runtime()
+        # ``self.agent`` is the live reference used by subsequent ``step()``
+        # calls; ``self._state.agent`` is what the autosave path serializes to
+        # base_state.json. Update both so they agree.
+        self.agent = new_agent
+        self._state.agent = new_agent
+
+    def _emit_event_from_any_thread(self, event: Event) -> None:
+        """Persist and publish ``event`` from any thread, in submission order.
+
+        One worker takes the state lock and calls _on_event; never blocks the
+        caller. Dropped with a debug log after close().
+        """
+        try:
+            self._event_emitter.submit(self._on_event_with_state_lock, event)
+        except RuntimeError:
+            logger.debug("Dropping %s emitted after close()", type(event).__name__)
 
     @observe(name="conversation.send_message")
     def send_message(self, message: str | Message, sender: str | None = None) -> None:
@@ -2824,6 +2896,8 @@ class LocalConversation(BaseConversation):
                 self._end_observability_span()
             except AttributeError:
                 pass
+        with contextlib.suppress(AttributeError):  # partly constructed instance
+            self._event_emitter.shutdown(wait=False, cancel_futures=True)
         # Clean up agent resources (e.g., ACPAgent subprocess)
         agent_error: Exception | None = None
         try:
