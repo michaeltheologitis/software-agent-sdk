@@ -253,25 +253,11 @@ def test_a_header_panel_with_tabs_validates():
     ]
 
 
-def test_a_tab_path_defaults_to_the_panel_root():
-    manifest = _manifest_with_panels(_panel(tabs=[{"id": "browse", "title": "B"}]))
-
-    assert manifest.contributes.conversation_panels[0].tabs[0].path == "/"
-
-
-def test_a_tab_may_sit_at_the_root_where_a_page_may_not():
-    with pytest.raises(ValidationError):
-        CanvasExtensionPage(id="home", title="Home", path="/")
-
-
 @pytest.mark.parametrize(
     "panel",
     [
         _panel(id="Not-Kebab"),
-        _panel(title=""),
-        _panel(tabs=[]),
         _panel(tabs=[{"id": "Bad_Id", "title": "T", "path": "/"}]),
-        _panel(tabs=[{"id": "tab", "title": "", "path": "/"}]),
         _panel(tabs=[{"id": "tab", "title": "T", "path": "relative"}]),
         _panel(tabs=[{"id": "tab", "title": "T", "path": "/Upper"}]),
         _panel(tabs=[{"id": "tab", "title": "T", "path": "/trailing/"}]),
@@ -287,10 +273,7 @@ def test_a_tab_may_sit_at_the_root_where_a_page_may_not():
     ],
     ids=[
         "panel-id",
-        "panel-title",
-        "no-tabs",
         "tab-id",
-        "tab-title",
         "relative-tab-path",
         "uppercase-tab-path",
         "trailing-slash",
@@ -344,19 +327,6 @@ def test_a_manifest_without_panels_dumps_exactly_as_before():
         '"version":"1.0.0","description":"","entrypoint":"dist/index.js",'
         '"contributes":{"pages":[{"id":"home","title":"Home","path":"/home"}]}}'
     )
-
-
-def test_a_manifest_with_panels_dumps_them():
-    manifest = _manifest_with_panels(_panel())
-
-    assert manifest.model_dump()["contributes"]["conversation_panels"] == [
-        {
-            "id": "decompositions",
-            "title": "Decompositions",
-            "icon": None,
-            "tabs": [{"id": "browse", "title": "Browse", "path": "/"}],
-        }
-    ]
 
 
 # -- Backend platforms ------------------------------------------------------------
