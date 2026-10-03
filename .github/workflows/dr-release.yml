@@ -1,0 +1,57 @@
+---
+# Fork only, never upstream. A push of a dr-N tag packs the TypeScript client
+# at the tagged commit and attaches the tarball to a new release dr-N, which
+# the Canvas fork installs by URL. The release is created once and its asset
+# never replaced: the Canvas fork's package-lock.json pins the tarball's hash.
+name: DR release (fork only)
+
+on:
+    push:
+        tags: [dr-*]
+
+permissions:
+    contents: write
+
+defaults:
+    run:
+        working-directory: clients/typescript
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - name: Check out the tag
+              uses: actions/checkout@v7
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v7
+              with:
+                  node-version: '22'
+                  cache: npm
+                  cache-dependency-path: clients/typescript/package-lock.json
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run tests
+              run: npm test
+
+            # npm pack builds dist/ through the package's prepare script.
+            - name: Pack the client
+              run: npm pack
+
+            # --prerelease keeps dr-N out of upstream's release tooling, which
+            # takes the newest full release as the previous version.
+            - name: Create the release with the tarball
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  version=$(node -p "require('./package.json').version")
+                  gh release create "$TAG" "openhands-typescript-client-${version}.tgz" \
+                    --repo "${{ github.repository }}" \
+                    --verify-tag \
+                    --prerelease \
+                    --title "$TAG" \
+                    --notes "Fork-only build of @openhands/typescript-client ${version} at ${GITHUB_SHA}, for the Canvas fork (michaeltheologitis/OpenHands). Not an upstream release."
