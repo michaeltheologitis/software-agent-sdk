@@ -1,6 +1,7 @@
 """Shared fixtures for canvas extension tests."""
 
 import json
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,24 @@ def write_extension(
     entry_file.parent.mkdir(parents=True, exist_ok=True)
     entry_file.write_text("console.log('ok')")
     return directory
+
+
+@pytest.fixture
+def dead_http_proxy(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point every proxy variable at a closed port, exempting nothing.
+
+    What a macOS system proxy does to loopback traffic, whose default
+    exceptions do not include 127.0.0.1.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, dead)
+        monkeypatch.setenv(name.lower(), dead)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    return dead
 
 
 @pytest.fixture

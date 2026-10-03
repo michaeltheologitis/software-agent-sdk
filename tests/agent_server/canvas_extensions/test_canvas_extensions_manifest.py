@@ -357,3 +357,27 @@ def test_a_manifest_with_panels_dumps_them():
             "tabs": [{"id": "browse", "title": "Browse", "path": "/"}],
         }
     ]
+
+
+# -- Backend platforms ------------------------------------------------------------
+
+
+def _backend(*platforms: str) -> dict[str, Any]:
+    artifact = {"path": "backend.tar.gz", "sha256": "0" * 64}
+    return {
+        "schema_version": 1,
+        "artifacts": {platform: artifact for platform in platforms},
+        "argv": ["{artifact_dir}/server"],
+    }
+
+
+def test_macos_backend_artifacts_are_accepted():
+    manifest = _manifest(backend=_backend("darwin-arm64", "darwin-amd64"))
+
+    assert manifest.backend is not None
+    assert set(manifest.backend.artifacts) == {"darwin-arm64", "darwin-amd64"}
+
+
+def test_an_unknown_backend_platform_is_still_refused():
+    with pytest.raises(ValidationError):
+        _manifest(backend=_backend("windows-amd64"))

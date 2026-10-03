@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,21 @@ _SAFE_INHERITED_ENV: Final[frozenset[str]] = frozenset(
     {"LANG", "LC_ALL", "LC_CTYPE", "PATH", "TMPDIR", "TZ"}
 )
 _MAX_LOG_BYTES: Final[int] = 256 * 1024
+_PLATFORM_SYSTEMS: Final[dict[str, str]] = {
+    "Darwin": "darwin",
+    "Linux": "linux",
+}
+_PLATFORM_MACHINES: Final[dict[str, str]] = {
+    "aarch64": "arm64",
+    "amd64": "amd64",
+    "arm64": "arm64",
+    "x86_64": "amd64",
+}
+# Loopback health probes never go through an HTTP proxy: macOS system proxy
+# settings, which urllib reads there, do not exempt 127.0.0.1.
+_LOOPBACK_OPENER: Final[urllib.request.OpenerDirector] = urllib.request.build_opener(
+    urllib.request.ProxyHandler({})
+)
 _STOP_TIMEOUT_SECONDS: Final[float] = 5
 
 
@@ -132,14 +147,16 @@ class CanvasExtensionBackendManager:
 
     @staticmethod
     def current_platform() -> BackendPlatform | None:
-        if platform.system() != "Linux":
+        """The running platform's artifact key, or None where backends do not run.
+
+        An x86-64 Python under Rosetta reports x86_64 and gets the
+        darwin-amd64 artifact, which runs under Rosetta too.
+        """
+        system = _PLATFORM_SYSTEMS.get(platform.system())
+        machine = _PLATFORM_MACHINES.get(platform.machine().lower())
+        if system is None or machine is None:
             return None
-        machine = platform.machine().lower()
-        if machine in {"x86_64", "amd64"}:
-            return "linux-amd64"
-        if machine in {"aarch64", "arm64"}:
-            return "linux-arm64"
-        return None
+        return cast(BackendPlatform, f"{system}-{machine}")
 
     def _backend_parts(
         self, name: str
@@ -398,7 +415,7 @@ class CanvasExtensionBackendManager:
     @staticmethod
     def _probe(url: str) -> bool:
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
+            with _LOOPBACK_OPENER.open(url, timeout=1) as response:
                 return 200 <= response.status < 400
         except (OSError, urllib.error.URLError):
             return False

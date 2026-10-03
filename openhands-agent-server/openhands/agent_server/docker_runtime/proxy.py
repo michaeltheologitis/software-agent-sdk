@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import Protocol
+from typing import Final, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -74,6 +74,16 @@ def strip_auth_query(path: str) -> str:
     )
 
 
+# Never proxied: an HTTP proxy from the environment (or, on macOS, the system
+# settings) would otherwise receive traffic meant for this host.
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """127.0.0.1, ::1 or localhost: targets that must never be proxied."""
+    return host in _LOOPBACK_HOSTS
+
+
 async def proxy_http(
     request: Request,
     workspace: ProxyTarget,
@@ -135,7 +145,10 @@ async def proxy_http(
     try:
         client = await stack.enter_async_context(
             httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=10.0)
+                timeout=httpx.Timeout(
+                    connect=10.0, read=timeout, write=30.0, pool=10.0
+                ),
+                trust_env=not _is_loopback_host(urlsplit(url).hostname),
             )
         )
         upstream = await stack.enter_async_context(
@@ -211,6 +224,7 @@ async def bridge_websocket(
         async with websockets.connect(
             upstream_url,
             additional_headers=upstream_headers or None,
+            proxy=None if _is_loopback_host(urlsplit(upstream_url).hostname) else True,
         ) as upstream_ws:
             await _bridge_websocket_loop(client_ws, upstream_ws)
     except websockets.exceptions.InvalidStatus as exc:

@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import tarfile
 import time
 from pathlib import Path
@@ -79,6 +80,14 @@ def _write_backend_extension(directory: Path, *, timeout: float = 3) -> Path:
                 "sha256": checksum,
             },
             "linux-arm64": {
+                "path": archive.name,
+                "sha256": checksum,
+            },
+            "darwin-amd64": {
+                "path": archive.name,
+                "sha256": checksum,
+            },
+            "darwin-arm64": {
                 "path": archive.name,
                 "sha256": checksum,
             },
@@ -443,3 +452,48 @@ def test_backend_http_lifecycle_and_data_deletion(
         )
         assert deleted.status_code == 200
         assert not (manager.data_dir / "my-extension").exists()
+
+
+@pytest.mark.parametrize(
+    "system, machine, expected",
+    [
+        ("Linux", "x86_64", "linux-amd64"),
+        ("Linux", "AMD64", "linux-amd64"),
+        ("Linux", "aarch64", "linux-arm64"),
+        ("Linux", "arm64", "linux-arm64"),
+        ("Darwin", "arm64", "darwin-arm64"),
+        ("Darwin", "x86_64", "darwin-amd64"),
+        ("Windows", "AMD64", None),
+        ("FreeBSD", "amd64", None),
+        ("Linux", "riscv64", None),
+        ("Darwin", "ppc", None),
+    ],
+)
+def test_current_platform_names_the_artifact_for_each_system_and_machine(
+    monkeypatch: pytest.MonkeyPatch, system: str, machine: str, expected: str | None
+):
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+
+    assert CanvasExtensionBackendManager.current_platform() == expected
+
+
+@pytest.mark.asyncio
+async def test_a_backend_becomes_ready_with_a_proxy_configured(
+    tmp_path: Path, dead_http_proxy: str
+):
+    """The loopback health probe goes direct, never to the configured proxy."""
+    source = _write_backend_extension(tmp_path / "source" / "my-extension")
+    installed_dir = tmp_path / "installed"
+    install_canvas_extension(str(source), installed_dir=installed_dir)
+    manager = CanvasExtensionBackendManager(installed_dir, tmp_path / "state")
+    revision = manager.revision("my-extension")
+    assert revision is not None
+    await manager.prepare("my-extension", revision)
+
+    started = await manager.start("my-extension", revision)
+
+    try:
+        assert started.state == "ready", started.detail
+    finally:
+        await manager.shutdown()
