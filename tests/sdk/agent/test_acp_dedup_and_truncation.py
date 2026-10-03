@@ -78,6 +78,25 @@ class TestACPToolCallDeduplication(unittest.TestCase):
         }
         self.assertEqual(ids, {"tc-a", "tc-b"})
 
+    def test_remote_events_merge_child_and_root_calls_separately(self) -> None:
+        root_started = _make_tool_call_event("tc-1", "root-started")
+        child_started = _make_tool_call_event("tc-1", "child-started").model_copy(
+            update={"acp_session_id": "child-a"}
+        )
+        child_done = _make_tool_call_event("tc-1", "child-done").model_copy(
+            update={"acp_session_id": "child-a"}
+        )
+        root_done = _make_tool_call_event("tc-1", "root-done")
+        for event in (root_started, child_started, child_done, root_done):
+            self._add(event)
+
+        outputs = {
+            (e.acp_session_id, e.raw_output)
+            for e in self.events._cached_events
+            if isinstance(e, ACPToolCallEvent)
+        }
+        self.assertEqual(outputs, {(None, "root-done"), ("child-a", "child-done")})
+
     def test_index_stays_consistent_after_replacement(self) -> None:
         ev1 = _make_tool_call_event("tc-1", "v1")
         ev2 = _make_tool_call_event("tc-1", "v2")

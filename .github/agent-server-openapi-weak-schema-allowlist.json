@@ -12,9 +12,27 @@
     "owner": "OpenHands OSS"
   },
   {
+    "pointer": "/components/schemas/ACPSessionMessageEvent/properties/meta/anyOf/0/additionalProperties",
+    "kind": "unrestricted-additional-properties",
+    "reason": "ACP _meta is opaque by protocol: implementations MUST NOT assume values at these keys.",
+    "owner": "OpenHands OSS"
+  },
+  {
+    "pointer": "/components/schemas/ACPSubagentEvent/properties/meta/anyOf/0/additionalProperties",
+    "kind": "unrestricted-additional-properties",
+    "reason": "ACP _meta is opaque by protocol: implementations MUST NOT assume values at these keys.",
+    "owner": "OpenHands OSS"
+  },
+  {
     "pointer": "/components/schemas/ACPToolCallEvent/properties/content/anyOf/0/items",
     "kind": "empty-object-schema",
     "reason": "ACP protocol raw input, output, and content payloads are intentionally proxy-opaque.",
+    "owner": "OpenHands OSS"
+  },
+  {
+    "pointer": "/components/schemas/ACPToolCallEvent/properties/meta/anyOf/0/additionalProperties",
+    "kind": "unrestricted-additional-properties",
+    "reason": "ACP _meta is opaque by protocol: implementations MUST NOT assume values at these keys.",
     "owner": "OpenHands OSS"
   },
   {

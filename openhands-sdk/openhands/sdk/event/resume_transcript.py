@@ -233,7 +233,11 @@ def _terminal_tool_indices(events: Sequence[Event]) -> set[int]:
     for i, event in enumerate(events):
         if isinstance(event, MessageEvent):
             msg_indices.add(i)
-        elif isinstance(event, ACPToolCallEvent) and event.tool_call_id:
+        elif (
+            isinstance(event, ACPToolCallEvent)
+            and event.tool_call_id
+            and event.acp_session_id is None
+        ):
             tool_positions.setdefault(event.tool_call_id, []).append(i)
 
     keep: set[int] = set()
@@ -311,6 +315,10 @@ def render_resume_transcript(
         if isinstance(event, MessageEvent):
             rendered = _render_message_event(event, max_message_chars)
         elif isinstance(event, ACPToolCallEvent):
+            # A sub-agent's calls are its own work; the root's cells and
+            # answers already summarize them.
+            if event.acp_session_id is not None:
+                continue
             if event.tool_call_id and i not in keep_tool_indices:
                 continue
             rendered = _render_tool_event(event, max_tool_chars)
