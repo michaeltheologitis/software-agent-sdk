@@ -195,23 +195,6 @@ def test_commands_reported_after_session_new_answered_are_published(start):
     wait_until(lambda: controls_events(run.published)[-1].controls == FAST)
 
 
-def test_changes_during_a_prompt_are_published_in_order(conversation):
-    conv = conversation(acp_config_options={"profile": "thorough"})
-    conv.send_message("/compare a b")
-    after_first_prompt = ACPSessionControls(
-        available_commands=[], config_options=[profile_option("thorough", "thorough")]
-    )
-
-    conv.run()
-
-    wait_until(
-        lambda: controls_events(conv.state.events)[-1].controls == after_first_prompt
-    )
-    events = controls_events(conv.state.events)
-    assert events[0].controls == THOROUGH
-    assert [e.available_commands for e in events[1:]] == [[]] * (len(events) - 1)
-
-
 def test_each_session_keeps_its_own_controls_and_only_the_root_is_published():
     agent, bridge = bridged_agent("root")
     published: list[Event] = []

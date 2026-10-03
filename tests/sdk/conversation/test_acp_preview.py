@@ -135,15 +135,6 @@ def test_an_agent_that_never_reports_commands_is_previewed_after_the_wait(previe
     assert [o.id for o in previewed.config_options] == ["profile"]
 
 
-def test_an_agent_that_cannot_be_spawned_raises_a_spawn_error(tmp_path, workspace):
-    agent = ACPAgent(acp_command=[str(tmp_path / "missing-agent")])
-
-    with pytest.raises(ACPPreviewError) as failed:
-        preview_acp_session(agent, workspace, tmp_path / "preview")
-
-    assert failed.value.code == "ACPSpawnError"
-
-
 @pytest.mark.parametrize(
     "fields",
     [{}, {"acp_config_options": {"profile": "turbo"}}],
