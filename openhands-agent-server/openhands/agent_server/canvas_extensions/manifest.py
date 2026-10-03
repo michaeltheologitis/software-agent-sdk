@@ -16,9 +16,9 @@ two security-critical checks around it:
 
 import re
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from openhands.sdk.extensions.installation.utils import validate_extension_name
 
@@ -41,7 +41,7 @@ PANEL_ICON_MEDIA_TYPES: Final[dict[str, str]] = {
 
 
 def _validate_contribution_id(value: str) -> str:
-    """Kebab-case, as validate_extension_name; shared by pages, panels and tabs."""
+    """Refuse an id that is not kebab-case, as validate_extension_name does."""
     try:
         validate_extension_name(value)
     except ValueError as e:
@@ -51,17 +51,17 @@ def _validate_contribution_id(value: str) -> str:
     return value
 
 
+ContributionId = Annotated[str, AfterValidator(_validate_contribution_id)]
+
+
 class CanvasExtensionPage(BaseModel):
     """A single page contributed to the Canvas UI by an extension."""
 
-    id: str = Field(description="Unique contribution id within the extension")
+    id: ContributionId = Field(
+        description="Unique contribution id within the extension"
+    )
     title: str = Field(description="Page title shown in Canvas navigation")
     path: str = Field(description="Route the page is mounted at, e.g. '/dashboard'")
-
-    @field_validator("id")
-    @classmethod
-    def _validate_id(cls, v: str) -> str:
-        return _validate_contribution_id(v)
 
     @field_validator("path")
     @classmethod
@@ -77,7 +77,7 @@ class CanvasExtensionPage(BaseModel):
 class CanvasExtensionPanelTab(BaseModel):
     """One tab of a conversation panel; its page mounts when the tab is selected."""
 
-    id: str = Field(
+    id: ContributionId = Field(
         description="Contribution id; the id the App registers this tab's page under",
     )
     title: str = Field(
@@ -88,11 +88,6 @@ class CanvasExtensionPanelTab(BaseModel):
         default="/",
         description="Where the tab's page starts inside the panel; '/' is its root",
     )
-
-    @field_validator("id")
-    @classmethod
-    def _validate_id(cls, value: str) -> str:
-        return _validate_contribution_id(value)
 
     @field_validator("path")
     @classmethod
@@ -108,7 +103,7 @@ class CanvasExtensionPanelTab(BaseModel):
 class CanvasExtensionConversationPanel(BaseModel):
     """A panel opened from a button in the conversation header."""
 
-    id: str = Field(
+    id: ContributionId = Field(
         description="Contribution id of the panel",
     )
     title: str = Field(
@@ -123,11 +118,6 @@ class CanvasExtensionConversationPanel(BaseModel):
         min_length=1,
         description="The panel's tabs, in tab-row order",
     )
-
-    @field_validator("id")
-    @classmethod
-    def _validate_id(cls, value: str) -> str:
-        return _validate_contribution_id(value)
 
     @field_validator("icon")
     @classmethod
