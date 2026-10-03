@@ -1949,6 +1949,120 @@ describe('Auxiliary API clients', () => {
     );
   });
 
+  describe('ACP session controls', () => {
+    const controls = {
+      available_commands: [
+        { name: 'compare', description: 'Compare two things', input: { hint: 'what to compare' } },
+      ],
+      config_options: [
+        {
+          id: 'profile',
+          name: 'Profile',
+          type: 'select',
+          current_value: 'thorough',
+          options: [{ value: 'thorough', name: 'thorough' }],
+        },
+      ],
+    };
+    const respond = (body: unknown) => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      ) as typeof fetch;
+    };
+    const requestedUrl = () => new URL((global.fetch as Mock).mock.calls[0][0] as string);
+
+    it('ConversationClient.previewAcpSession posts the start payload and returns the controls', async () => {
+      respond(controls);
+      const payload = {
+        agent_profile_id: 'profile-1',
+        workspace: { working_dir: '/w' },
+        acp_config_options: { profile: 'thorough' },
+      };
+
+      const previewed = await new ConversationClient({
+        host: 'http://example.com',
+      }).previewAcpSession(payload);
+
+      expect(previewed).toEqual(controls);
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://example.com/api/acp/preview',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify(payload) })
+      );
+    });
+
+    it('ConversationClient.setAcpConfigOption posts the id and value and returns what the set did', async () => {
+      respond({ applied: true, controls });
+
+      const result = await new ConversationClient({
+        host: 'http://example.com',
+      }).setAcpConfigOption('conversation-1', 'profile', 'thorough');
+
+      expect(result).toEqual({ applied: true, controls });
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://example.com/api/conversations/conversation-1/acp/config-options',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ config_id: 'profile', value: 'thorough' }),
+        })
+      );
+    });
+
+    it('ConversationClient.getAcpSessionControls reads the newest event by the kind the search matches', async () => {
+      respond({ items: [{ id: 'e1', kind: 'ACPSessionControlsEvent', ...controls }] });
+
+      const current = await new ConversationClient({
+        host: 'http://example.com',
+      }).getAcpSessionControls('conversation-1');
+
+      expect(current).toEqual(controls);
+      const url = requestedUrl();
+      expect(url.pathname).toBe('/api/conversations/conversation-1/events/search');
+      expect(Object.fromEntries(url.searchParams)).toEqual({
+        kind: 'openhands.sdk.event.acp_session_controls.ACPSessionControlsEvent',
+        sort_order: 'TIMESTAMP_DESC',
+        limit: '1',
+      });
+    });
+
+    it('ConversationClient.getAcpSessionControls is empty before the agent reported anything', async () => {
+      respond({ items: [] });
+
+      const current = await new ConversationClient({
+        host: 'http://example.com',
+      }).getAcpSessionControls('conversation-1');
+
+      expect(current).toEqual({ available_commands: [], config_options: [] });
+    });
+
+    it('RemoteConversation sets an option and reads the newest controls of its conversation', async () => {
+      const agent = new Agent({ llm: { model: 'gpt-4o', api_key: 'k' } });
+      const workspace = new RemoteWorkspace({ host: 'http://example.com', workingDir: '/tmp' });
+      const conversation = new RemoteConversation(agent, workspace, {
+        conversationId: 'conv-123',
+      });
+
+      respond({ applied: false, controls: { available_commands: [], config_options: [] } });
+      const result = await conversation.setAcpConfigOption('profile', 'fast');
+      expect(result.applied).toBe(false);
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://example.com/api/conversations/conv-123/acp/config-options',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ config_id: 'profile', value: 'fast' }),
+        })
+      );
+
+      respond({ items: [{ id: 'e1', kind: 'ACPSessionControlsEvent', ...controls }] });
+      expect(await conversation.getAcpSessionControls()).toEqual(controls);
+      expect(requestedUrl().searchParams.get('kind')).toBe(
+        'openhands.sdk.event.acp_session_controls.ACPSessionControlsEvent'
+      );
+    });
+  });
+
   it('ConversationClient.navigateConversation POSTs event_id and returns the re-rooted info', async () => {
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ id: 'conversation-1', leaf_event_id: 'event-7' }), {

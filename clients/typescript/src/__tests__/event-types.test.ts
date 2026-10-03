@@ -25,6 +25,8 @@ import {
   isObservationEvent,
   isAgentErrorEvent,
   isObservationLike,
+  isACPSessionControlsEvent,
+  acpSessionControlsOf,
   generateEventId,
 } from '../events/types';
 
@@ -426,5 +428,28 @@ describe('generateEventId', () => {
   it('should generate IDs with expected format', () => {
     const id = generateEventId();
     expect(id).toMatch(/^evt_\d+_[a-z0-9]+$/);
+  });
+});
+
+describe('ACPSessionControlsEvent', () => {
+  const controlsEvent = {
+    id: 'e1',
+    kind: 'ACPSessionControlsEvent' as const,
+    available_commands: [{ name: 'summarize', description: 'Summarize the input' }],
+    config_options: [],
+  };
+
+  it('is recognised by its kind', () => {
+    expect(isACPSessionControlsEvent(controlsEvent)).toBe(true);
+    expect(isACPSessionControlsEvent({ kind: 'MessageEvent' })).toBe(false);
+  });
+
+  it('yields the lists of the first controls event, replacing rather than merging', () => {
+    const older = { ...controlsEvent, id: 'e0', available_commands: [] };
+
+    expect(acpSessionControlsOf([{ kind: 'MessageEvent' }, controlsEvent, older])).toEqual({
+      available_commands: controlsEvent.available_commands,
+      config_options: [],
+    });
   });
 });
