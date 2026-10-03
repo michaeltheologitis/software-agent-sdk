@@ -159,6 +159,7 @@ jobs:
                       openhands-sdk/openhands/sdk/settings/acp_install_catalog.py
                       tests/sdk/agent/test_acp_conformance.py
                       tests/sdk/agent/test_acp_session_controls_live.py
+                      tests/sdk/agent/test_acp_subagents_live.py
                       tests/sdk/settings/test_acp_install_catalog_pins_live.py
                       pyproject.toml
                       uv.lock
@@ -192,6 +193,7 @@ jobs:
                     -m acp_live \
                     tests/sdk/agent/test_acp_conformance.py \
                     tests/sdk/agent/test_acp_session_controls_live.py \
+                    tests/sdk/agent/test_acp_subagents_live.py \
                     tests/sdk/settings/test_acp_install_catalog_pins_live.py
 
     tools-tests:

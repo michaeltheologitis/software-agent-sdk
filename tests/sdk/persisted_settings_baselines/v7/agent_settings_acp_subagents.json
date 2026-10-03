@@ -1,0 +1,12 @@
+{
+  "__expected__": {
+    "agent_kind": "acp",
+    "acp_server": "custom",
+    "acp_subagents": true
+  },
+  "schema_version": 7,
+  "agent_kind": "acp",
+  "acp_server": "custom",
+  "acp_command": ["my-acp-agent"],
+  "acp_subagents": true
+}

@@ -1546,6 +1546,14 @@ def test_acp_create_agent_forwards_isolate_data_dir() -> None:
     assert isolated.acp_isolate_data_dir is True
 
 
+def test_acp_create_agent_forwards_subagents() -> None:
+    """``acp_subagents`` is off by default and an explicit True reaches the agent."""
+    assert ACPAgentSettings(acp_server="codex").create_agent().acp_subagents is False
+
+    opted_in = ACPAgentSettings(acp_server="codex", acp_subagents=True).create_agent()
+    assert opted_in.acp_subagents is True
+
+
 def test_acp_custom_server_with_command_resolves() -> None:
     settings = ACPAgentSettings(
         acp_server="custom",
