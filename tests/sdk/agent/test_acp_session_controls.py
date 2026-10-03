@@ -14,7 +14,6 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -25,6 +24,7 @@ from acp.schema import (
     ConfigOptionUpdate,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
+    SetSessionConfigOptionResponse,
 )
 from pydantic import ValidationError
 
@@ -333,27 +333,27 @@ def test_start_values_reach_the_agent_after_session_new_and_before_the_prompt(
 
 
 async def test_values_are_set_in_order_and_every_response_is_recorded():
-    responses = {
-        "a": SimpleNamespace(config_options=["after-a"]),
-        "b": SimpleNamespace(config_options=["after-b"]),
-    }
+    def answer(config_id: str, **_: Any) -> SetSessionConfigOptionResponse:
+        option = SessionConfigOptionSelect(
+            type="select", id=config_id, name=config_id, current_value="", options=[]
+        )
+        return SetSessionConfigOptionResponse(config_options=[option])
+
     conn = AsyncMock()
-    conn.set_config_option.side_effect = lambda config_id, **_: responses[config_id]
+    conn.set_config_option.side_effect = answer
     recorded: list[tuple[str, list[str]]] = []
 
     await _apply_config_options(
         conn,
         "s1",
         {"b": "2", "a": True},
-        on_config_options=lambda sid, options: recorded.append((sid, list(options))),
+        on_config_options=lambda sid, options: recorded.append(
+            (sid, [option.id for option in options])
+        ),
         mask=lambda text: text,
     )
 
-    assert [c.kwargs["config_id"] for c in conn.set_config_option.await_args_list] == [
-        "b",
-        "a",
-    ]
-    assert recorded == [("s1", ["after-b"]), ("s1", ["after-a"])]
+    assert recorded == [("s1", ["b"]), ("s1", ["a"])]
 
 
 def test_a_refused_start_value_ends_the_start_and_no_prompt_is_sent(
@@ -455,7 +455,9 @@ def test_a_model_switch_through_set_config_option_updates_the_published_model():
         ],
     )
     conn = AsyncMock()
-    conn.set_config_option.return_value = SimpleNamespace(config_options=[model_option])
+    conn.set_config_option.return_value = SetSessionConfigOptionResponse(
+        config_options=[model_option]
+    )
     agent._conn = conn
     agent._executor = AsyncExecutor()
     agent._model_via_config_option = True
