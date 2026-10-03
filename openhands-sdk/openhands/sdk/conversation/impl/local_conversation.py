@@ -1831,6 +1831,22 @@ class LocalConversation(BaseConversation):
             )
         return controls
 
+    def cancel_acp_session(self, session_id: str) -> None:
+        """Cancel one ACP sub-agent session's current work.
+
+        Unlike ``switch_acp_model`` this takes no state lock: it must work while
+        a synchronous ``run()`` holds the lock for the whole turn.
+
+        Raises:
+            ValueError: the conversation's agent is not an ``ACPAgent``.
+            ACPSessionNotFoundError: as ``ACPAgent.cancel_acp_session``.
+            ACPSessionNotCancellableError: as ``ACPAgent.cancel_acp_session``.
+            TimeoutError: as ``ACPAgent.cancel_acp_session``.
+        """
+        if not isinstance(self.agent, ACPAgent):
+            raise ValueError("cancel_acp_session is only supported for ACP conversations.")
+        self.agent.cancel_acp_session(session_id)
+
     def _replace_acp_agent(
         self,
         update: dict[str, Any],

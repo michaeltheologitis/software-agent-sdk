@@ -2663,3 +2663,90 @@ def test_interrupt_endpoint_cancels_running_conversation(
         assert events_resp.status_code == 200
         items = events_resp.json()["items"]
         assert len(items) >= 1, f"Expected at least one InterruptEvent, got: {items}"
+
+
+def test_acp_subagent_sessions_over_live_server(server_env, acp_request_log):
+    """A sub-agent run through a real server: the tree reaches REST and the
+    WebSocket alike, and the cancel route stops one child end to end."""
+    from openhands.sdk.agent import ACPAgent
+    from openhands.sdk.event import ACPSubagentEvent, ACPToolCallEvent
+    from tests.conftest import scripted_acp_command
+
+    agent = ACPAgent(
+        acp_command=scripted_acp_command("--subagents", "--cancel-wait", "30"),
+        acp_subagents=True,
+    )
+    workspace = RemoteWorkspace(
+        host=server_env["host"], working_dir=str(server_env["workspace_path"])
+    )
+    conv = cast(RemoteConversation, Conversation(agent=agent, workspace=workspace))
+    sub_agent_kinds = {
+        "ACPSubagentEvent",
+        "ACPSessionMessageEvent",
+        "ACPSessionTextEvent",
+    }
+    try:
+        conv.send_message("hello")
+        conv.run(blocking=False)
+        with httpx.Client(base_url=server_env["host"], timeout=10) as client:
+            cancel_url = f"/api/conversations/{conv.id}/acp/sessions/child-b/cancel"
+            deadline = time.monotonic() + 30
+            while (response := client.post(cancel_url)).status_code != 200:
+                assert response.status_code in (404, 409), response.text
+                assert time.monotonic() < deadline, "child-b was never announced"
+                time.sleep(0.05)
+            assert response.json() == {"session_id": "child-b", "requested": True}
+
+            def rest_events() -> list[dict]:
+                return client.get(
+                    f"/api/conversations/{conv.id}/events/search",
+                    params={"limit": 100},
+                ).json()["items"]
+
+            def child_b_cancelled() -> bool:
+                snapshots = [
+                    e
+                    for e in rest_events()
+                    if e["kind"] == "ACPSubagentEvent"
+                    and e["acp_session_id"] == "child-b"
+                ]
+                return bool(snapshots) and snapshots[-1].get("stop_reason") == (
+                    "cancelled"
+                )
+
+            while not child_b_cancelled():
+                assert time.monotonic() < deadline, "child-b never turned cancelled"
+                time.sleep(0.05)
+            over_rest = rest_events()
+
+        def sub_agent_ids(kinds: list[tuple[str, str]]) -> list[str]:
+            return [event_id for kind, event_id in kinds if kind in sub_agent_kinds]
+
+        rest_ids = sub_agent_ids([(e["kind"], e["id"]) for e in over_rest])
+        while sub_agent_ids(
+            [(type(e).__name__, e.id) for e in conv.state.events]
+        ) != rest_ids:
+            assert time.monotonic() < deadline + 10, "WebSocket never caught up"
+            time.sleep(0.05)
+
+        events = list(conv.state.events)
+        cell = next(
+            i
+            for i, e in enumerate(events)
+            if isinstance(e, ACPToolCallEvent) and e.tool_call_id == "cell-1"
+        )
+        children = [
+            i for i, e in enumerate(events) if type(e).__name__ in sub_agent_kinds
+        ]
+        assert children and min(children) > cell
+        last_child_b = [
+            e
+            for e in events
+            if isinstance(e, ACPSubagentEvent) and e.acp_session_id == "child-b"
+        ][-1]
+        assert (last_child_b.state, last_child_b.stop_reason) == ("idle", "cancelled")
+        assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
+            acp_request_log()
+        )
+    finally:
+        conv.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import Field
 from rich.text import Text
 
 from openhands.sdk.event.base import Event
@@ -63,6 +64,14 @@ class ACPToolCallEvent(Event):
     raw_output: Any | None = None
     content: list[Any] | None = None
     is_error: bool = False
+    acp_session_id: str | None = Field(
+        default=None,
+        description="The ACP sub-agent session the call ran in; None for the root.",
+    )
+    meta: dict[str, Any] | None = Field(
+        default=None,
+        description="The call's latest ACP _meta; recorded with acp_subagents.",
+    )
 
     @property
     def is_patch_edit(self) -> bool:

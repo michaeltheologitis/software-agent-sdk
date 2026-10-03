@@ -59,6 +59,7 @@ from acp.schema import (
     HttpMcpServer,
     ImageContentBlock,
     KillTerminalResponse,
+    LoadSessionResponse,
     McpServerStdio,
     PermissionOption,
     PromptResponse,
@@ -101,7 +102,19 @@ from openhands.sdk.agent.acp_models import (
     ACPModelInfo,
     ACPSessionControls,
 )
+from openhands.sdk.agent.acp_subagents import (
+    ACPSessionNotCancellableError,
+    ACPSessionNotFoundError,
+    ACPSubagentSessions,
+)
 from openhands.sdk.agent.acp_tracing import ACPTurnTrace
+from openhands.sdk.agent.acp_unstable import (
+    SUBAGENT_CLIENT_CAPABILITIES,
+    SessionMessage,
+    SessionMessageChunk,
+    SubagentClientSideConnection,
+    SubagentUpdate,
+)
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.agent.stream_context import StreamContext
 from openhands.sdk.context import AgentContext
@@ -187,6 +200,8 @@ _ACP_CONFIG_OPTION_TIMEOUT: float = float(
     os.environ.get("ACP_CONFIG_OPTION_TIMEOUT", "30.0")
 )
 _ACP_SESSION_CLOSE_TIMEOUT: float = 2.0
+# Bound for writing one sub-agent session/cancel notification.
+_ACP_SUBAGENT_CANCEL_TIMEOUT: float = 2.0
 _ACP_NPX_CACHE_WARM_TIMEOUT: float = float(
     os.environ.get("ACP_NPX_CACHE_WARM_TIMEOUT", "300")
 )
@@ -1379,7 +1394,7 @@ class _OpenHandsACPBridge:
       treat the post-message event as authoritative.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, subagents: bool = False) -> None:
         self.accumulated_text: list[str] = []
         self.accumulated_thoughts: list[str] = []
         self.accumulated_tool_calls: list[dict[str, Any]] = []
@@ -1430,11 +1445,26 @@ class _OpenHandsACPBridge:
         self._commands_reported: dict[str, threading.Event] = {}
         # Bound by ACPAgent to publish the root session's controls.
         self.on_session_controls_changed: Callable[[], None] | None = None
+        # Sub-agent sessions (ACPAgent.acp_subagents); None routes as before.
+        self.subagents: ACPSubagentSessions | None = (
+            ACPSubagentSessions(mask=self._mask_value) if subagents else None
+        )
+        self._unannounced_sessions: set[str] = set()
+        # The conversation's emitter (ACPAgent._on_session_event), set per
+        # connection; every child event goes through it.
+        self.on_session_event: Callable[[Event], None] | None = None
 
     def reset(self) -> None:
         self.accumulated_text.clear()
         self.accumulated_thoughts.clear()
-        self.accumulated_tool_calls.clear()
+        # A child's open tool call can outlive the root's turn; its terminal
+        # update must still find the entry.
+        self.accumulated_tool_calls[:] = [
+            tc
+            for tc in self.accumulated_tool_calls
+            if tc.get("acp_session_id") is not None
+            and tc.get("status") not in _TERMINAL_TOOL_CALL_STATUSES
+        ]
         self.on_token = None
         self.on_event = None
         self.on_activity = None
@@ -1514,7 +1544,7 @@ class _OpenHandsACPBridge:
         server could echo a credential there (e.g. ``Running: curl -H
         'Authorization: Bearer <token>'``), so it is masked too.
         """
-        for key in ("title", "raw_input", "raw_output", "content"):
+        for key in ("title", "raw_input", "raw_output", "content", "meta"):
             if entry.get(key) is not None:
                 entry[key] = self._mask_value(entry[key])
 
@@ -1584,6 +1614,90 @@ class _OpenHandsACPBridge:
             return True
         return False
 
+    def unstable_session_update(
+        self,
+        session_id: str,
+        update: SubagentUpdate | SessionMessage | SessionMessageChunk,
+    ) -> None:
+        """The shim's callback: route one unstable update; never awaits."""
+        self._last_activity_monotonic = time.monotonic()
+        if self.subagents is None or session_id == self._fork_session_id:
+            return
+        if isinstance(update, SubagentUpdate):
+            events = self.subagents.on_subagent_update(session_id, update)
+        elif isinstance(update, SessionMessage):
+            events = self.subagents.on_session_message(session_id, update)
+        else:
+            events = self.subagents.on_session_message_chunk(session_id, update)
+        self.emit_subagent_events(events)
+        self._maybe_signal_activity()
+
+    def emit_subagent_events(self, events: Sequence[Event]) -> None:
+        """Submit each event to ``on_session_event``, in order; drop them while
+        replaying, and with a debug line when no emitter is wired."""
+        if not events or (self.subagents is not None and self.subagents.replaying):
+            return
+        emit = self.on_session_event
+        if emit is None:
+            logger.debug(
+                "Dropping %d ACP sub-agent event(s): no emitter is wired", len(events)
+            )
+            return
+        for event in events:
+            try:
+                emit(event)
+            except Exception:
+                logger.debug("Emitting %s failed", type(event).__name__, exc_info=True)
+
+    def flush_subagent_text(self) -> None:
+        """Submit every open child segment; runs on the ACP loop after a prompt."""
+        if self.subagents is not None:
+            self.emit_subagent_events(self.subagents.flush_all())
+
+    def _child_session(self, session_id: str) -> str | None:
+        """``session_id`` when it is an announced child, else None.
+
+        Warns once for a session that is neither the root nor a child: its
+        traffic follows the root's path, as without the opt-in.
+        """
+        subagents = self.subagents
+        if subagents is None or session_id == subagents.root_session_id:
+            return None
+        if subagents.is_child(session_id):
+            return session_id
+        if session_id not in self._unannounced_sessions:
+            self._unannounced_sessions.add(session_id)
+            logger.warning(
+                "ACP session %s was never announced as a sub-agent; "
+                "routing its updates to the root session",
+                _fingerprint_session_id(session_id),
+            )
+        return None
+
+    def _route_child_update(self, child: str, update: Any) -> bool:
+        """Store a child's text, usage or other non-tool update; False for a
+        tool call, which takes the shared tool-call path."""
+        assert self.subagents is not None
+        if isinstance(update, ToolCallStart | ToolCallProgress):
+            return False
+        if self.subagents.replaying:
+            return True
+        if isinstance(update, AgentMessageChunk | AgentThoughtChunk):
+            if isinstance(update.content, TextContentBlock):
+                self.emit_subagent_events(
+                    self.subagents.on_child_text(
+                        child,
+                        update.content.text,
+                        thought=isinstance(update, AgentThoughtChunk),
+                    )
+                )
+            self._maybe_signal_activity()
+        elif isinstance(update, UsageUpdate):
+            self.emit_subagent_events(self.subagents.on_child_usage(child, update))
+        else:
+            logger.debug("ACP sub-agent update not stored: %s", type(update).__name__)
+        return True
+
     def _notify_session_controls_changed(self) -> None:
         callback = self.on_session_controls_changed
         if callback is None:
@@ -1623,6 +1737,16 @@ class _OpenHandsACPBridge:
                     )
             return
 
+        child = self._child_session(session_id)
+        if self.subagents is not None:
+            if not isinstance(update, UsageUpdate) and not (
+                child is not None
+                and isinstance(update, AgentMessageChunk | AgentThoughtChunk)
+            ):
+                self.emit_subagent_events(self.subagents.before_update(session_id))
+            if child is not None and self._route_child_update(child, update):
+                return
+
         if isinstance(update, AgentMessageChunk):
             if isinstance(update.content, TextContentBlock):
                 # Mask once, then use the masked chunk for both the persisted
@@ -1658,14 +1782,18 @@ class _OpenHandsACPBridge:
                 "raw_input": update.raw_input,
                 "raw_output": update.raw_output,
                 "content": _serialize_tool_content(update.content),
+                "acp_session_id": child,
+                "meta": update.field_meta if self.subagents is not None else None,
             }
             self._mask_tool_call_entry(entry)
             self.accumulated_tool_calls.append(entry)
-            self.trace.tool_started(entry)
-            if entry.get("status") in _TERMINAL_TOOL_CALL_STATUSES:
-                # No later transition will arrive for this call, so close its
-                # span now; leaving it open would bill the rest of the turn to it.
-                self.trace.tool_finished(entry)
+            if child is None:
+                self.trace.tool_started(entry)
+                if entry.get("status") in _TERMINAL_TOOL_CALL_STATUSES:
+                    # No later transition will arrive for this call, so close
+                    # its span now; leaving it open would bill the rest of the
+                    # turn to it.
+                    self.trace.tool_finished(entry)
             logger.debug("ACP tool call start: %s", update.tool_call_id)
             # Emit one early "started" event — the action half of the
             # action->observation pair. (If the server reports a terminal
@@ -1681,7 +1809,10 @@ class _OpenHandsACPBridge:
             target: dict[str, Any] | None = None
             prev_status: str | None = None
             for index, tc in enumerate(self.accumulated_tool_calls):
-                if tc["tool_call_id"] == update.tool_call_id:
+                if (
+                    tc["tool_call_id"] == update.tool_call_id
+                    and tc.get("acp_session_id") == child
+                ):
                     prev_status = tc.get("status")
                     updated = dict(tc)
                     if update.title is not None:
@@ -1696,6 +1827,8 @@ class _OpenHandsACPBridge:
                         updated["raw_output"] = update.raw_output
                     if update.content is not None:
                         updated["content"] = _serialize_tool_content(update.content)
+                    if self.subagents is not None and update.field_meta is not None:
+                        updated["meta"] = update.field_meta
                     self._mask_tool_call_entry(updated)
                     self.accumulated_tool_calls[index] = updated
                     target = updated
@@ -1714,7 +1847,8 @@ class _OpenHandsACPBridge:
                 and prev_status not in _TERMINAL_TOOL_CALL_STATUSES
             )
             if target is not None and became_terminal:
-                self.trace.tool_finished(target)
+                if child is None:
+                    self.trace.tool_finished(target)
                 self._emit_tool_call_event(target)
             self._maybe_signal_activity()
         else:
@@ -1727,9 +1861,11 @@ class _OpenHandsACPBridge:
         ``ToolCallProgress`` so downstream consumers see tool cards appear
         and update as the subprocess runs.  The same ``tool_call_id`` is
         reused on every emission — consumers should dedupe by id and treat
-        the last-seen event as authoritative.
+        the last-seen event as authoritative. A sub-agent session's call goes
+        to the conversation's emitter instead of the turn's ``on_event``.
         """
-        if self.on_event is None:
+        child = tc.get("acp_session_id")
+        if child is None and self.on_event is None:
             return
         try:
             raw_output = tc.get("raw_output")
@@ -1746,8 +1882,13 @@ class _OpenHandsACPBridge:
                 raw_output=raw_output,
                 content=tc.get("content"),
                 is_error=tc.get("status") == "failed",
+                acp_session_id=child,
+                meta=tc.get("meta"),
             )
-            self.on_event(event)
+            if child is not None:
+                self.emit_subagent_events([event])
+            elif self.on_event is not None:
+                self.on_event(event)
         except Exception:
             logger.debug("on_event callback failed", exc_info=True)
 
@@ -2069,6 +2210,16 @@ class ACPAgent(AgentBase):
             "shared HOME is already private, and relocating it would hide a "
             "pre-existing interactive login. Downstream policy decides when to "
             "enable it; the SDK owns where the root lives."
+        ),
+    )
+    acp_subagents: bool = Field(
+        default=False,
+        description=(
+            "Advertise ACP's unstable sub-agent sessions "
+            "(clientCapabilities.subagents, schema 1.24.1) to the ACP server, and "
+            "route and persist the child sessions it exposes: their association "
+            "with the parent, tool calls, messages, text and cost. Off by default "
+            "while the protocol draft is unstable."
         ),
     )
 
@@ -3132,8 +3283,9 @@ class ACPAgent(AgentBase):
 
     def _launch_acp_session(self, state: ConversationState) -> None:
         """Spawn the ACP subprocess and create or load the session."""
-        client = _OpenHandsACPBridge()
+        client = _OpenHandsACPBridge(subagents=self.acp_subagents)
         self._client = client
+        client.on_session_event = self._on_session_event
         self._bind_session_controls()
         # Bind the secret masker for the conversation's lifetime. It's derived
         # from state.secret_registry (stable for the conversation) and touches
@@ -3144,6 +3296,10 @@ class ACPAgent(AgentBase):
         # client and may fire while no step()/astep() turn is active.
         client.mask = state.secret_registry.mask_secrets_in_output
         self._bind_file_credential_masking()
+        # Children stored by earlier connections; their grants and states do
+        # not carry over to this one.
+        if client.subagents is not None:
+            client.emit_subagent_events(client.subagents.seed(state.events))
 
         # Build the subprocess environment. Precedence, highest first:
         #   state.secret_registry > os.environ > default_environment
@@ -3289,11 +3445,19 @@ class ACPAgent(AgentBase):
                 _log_acp_subprocess_stderr(process.stderr)
             )
 
-            conn = ClientSideConnection(
-                client,
-                process.stdin,  # write to subprocess
-                filtered_reader,  # read filtered output
-            )
+            if self.acp_subagents:
+                conn: ClientSideConnection = SubagentClientSideConnection(
+                    client,
+                    process.stdin,
+                    filtered_reader,
+                    on_unstable_update=client.unstable_session_update,
+                )
+            else:
+                conn = ClientSideConnection(
+                    client,
+                    process.stdin,  # write to subprocess
+                    filtered_reader,  # read filtered output
+                )
 
             # Track the subprocess/connection on self as soon as they exist, so
             # that if a *later* init step fails (e.g. the resume model reapply
@@ -3309,7 +3473,13 @@ class ACPAgent(AgentBase):
             self._stderr_log_task = stderr_log_task
 
             # Initialize the protocol and discover server identity
-            init_response = await conn.initialize(protocol_version=1)
+            if self.acp_subagents:
+                init_response = await conn.initialize(
+                    protocol_version=1,
+                    client_capabilities=SUBAGENT_CLIENT_CAPABILITIES,
+                )
+            else:
+                init_response = await conn.initialize(protocol_version=1)
             agent_name = ""
             agent_version = ""
             if init_response.agent_info is not None:
@@ -3433,10 +3603,8 @@ class ACPAgent(AgentBase):
             available_models: list[ACPModelInfo] | None = None
             if prior_session_id is not None:
                 try:
-                    load_response = await conn.load_session(
-                        cwd=working_dir,
-                        session_id=prior_session_id,
-                        mcp_servers=acp_mcp_servers,
+                    load_response = await self._load_session(
+                        conn, client, prior_session_id, working_dir, acp_mcp_servers
                     )
                     session_id = prior_session_id
                     # load_session often omits the model block; fall back to the
@@ -3488,6 +3656,8 @@ class ACPAgent(AgentBase):
                     **session_meta,
                 )
                 session_id = response.session_id
+                if client.subagents is not None:
+                    client.subagents.root_session_id = session_id
                 # Detect the model-selection protocol the server advertised (in
                 # the same scan) so init and later runtime switches use the right
                 # call.
@@ -3642,25 +3812,32 @@ class ACPAgent(AgentBase):
         """
         on_event = self._client.on_event
         self._clear_turn_callbacks()
-        if on_event is None:
-            return
         for tc in self._client.accumulated_tool_calls:
             status = tc.get("status")
-            if status in _TERMINAL_TOOL_CALL_STATUSES:
+            child = tc.get("acp_session_id")
+            if status in _TERMINAL_TOOL_CALL_STATUSES or (
+                child is None and on_event is None
+            ):
                 continue
             try:
-                on_event(
-                    ACPToolCallEvent(
-                        tool_call_id=tc["tool_call_id"],
-                        title=tc["title"],
-                        status="failed",
-                        tool_kind=tc.get("tool_kind"),
-                        raw_input=tc.get("raw_input"),
-                        raw_output=tc.get("raw_output"),
-                        content=tc.get("content"),
-                        is_error=True,
-                    )
+                failure = ACPToolCallEvent(
+                    tool_call_id=tc["tool_call_id"],
+                    title=tc["title"],
+                    status="failed",
+                    tool_kind=tc.get("tool_kind"),
+                    raw_input=tc.get("raw_input"),
+                    raw_output=tc.get("raw_output"),
+                    content=tc.get("content"),
+                    is_error=True,
+                    acp_session_id=child,
+                    meta=tc.get("meta"),
                 )
+                if child is not None:
+                    # The emitter's FIFO keeps it after the call's own
+                    # ``started`` event, which went the same way.
+                    self._client.emit_subagent_events([failure])
+                elif on_event is not None:
+                    on_event(failure)
             except Exception:
                 logger.debug(
                     "Failed to emit supersede event for %s",
@@ -3685,7 +3862,10 @@ class ACPAgent(AgentBase):
         common case, since ``conn.prompt`` only returns after its tools run).
         """
         for tc in self._client.accumulated_tool_calls:
-            if tc.get("status") in _TERMINAL_TOOL_CALL_STATUSES:
+            # A sub-agent's open call is its agent's to close.
+            if tc.get("status") in _TERMINAL_TOOL_CALL_STATUSES or tc.get(
+                "acp_session_id"
+            ):
                 continue
             tc["status"] = "completed"
             self._client._emit_tool_call_event(tc)
@@ -3898,6 +4078,7 @@ class ACPAgent(AgentBase):
                     _USAGE_UPDATE_TIMEOUT,
                     _fingerprint_session_id(session_id),
                 )
+        self._client.flush_subagent_text()
         return response
 
     def _idle_timeout_message(self) -> str:
@@ -4012,7 +4193,13 @@ class ACPAgent(AgentBase):
             response_text = "(No response from ACP server)"
 
         self._client.trace.finish_turn(
-            response_text, thought_text, self._client.accumulated_tool_calls
+            response_text,
+            thought_text,
+            [
+                tc
+                for tc in self._client.accumulated_tool_calls
+                if tc.get("acp_session_id") is None
+            ],
         )
 
         # ACP step() boundaries are full remote assistant turns, not
@@ -4844,6 +5031,66 @@ class ACPAgent(AgentBase):
         if self._client is not None and self._session_id is not None:
             self._client.wait_for_available_commands(self._session_id, timeout)
         return self.session_controls
+
+    def cancel_acp_session(self, session_id: str) -> None:
+        """Ask the ACP server to cancel one sub-agent session's current work.
+
+        Sends ``session/cancel`` for ``session_id`` when the server announced that
+        child on the live connection with a ``cancel`` capability. Returns once the
+        notification is written; the outcome arrives as the child's next state
+        update. Never takes the conversation's state lock, so it works mid-turn.
+
+        Raises:
+            ACPSessionNotFoundError: no sub-agent session with this id is known.
+            ACPSessionNotCancellableError: no live ACP connection, the root
+                session, or no current ``cancel`` grant.
+            TimeoutError: the notification was not written within 2 seconds.
+        """
+        if not self.has_live_acp_session:
+            raise ACPSessionNotCancellableError(session_id)
+        if self._client is None or self._client.subagents is None:
+            raise ACPSessionNotFoundError(session_id)
+        timeout = _ACP_SUBAGENT_CANCEL_TIMEOUT
+        try:
+            self._executor.run_async(
+                self._acancel_acp_session, session_id, timeout=timeout
+            )
+        except TimeoutError:
+            raise TimeoutError(
+                f"ACP server did not accept the cancel for {session_id} "
+                f"within {timeout:g}s."
+            ) from None
+
+    async def _acancel_acp_session(self, session_id: str) -> None:
+        """Check the live grant and send ``session/cancel``; on the ACP loop."""
+        assert self._client is not None and self._client.subagents is not None
+        assert self._conn is not None
+        self._client.subagents.check_cancel(session_id)
+        await self._conn.cancel(session_id=session_id)
+
+    async def _load_session(
+        self,
+        conn: ClientSideConnection,
+        client: _OpenHandsACPBridge,
+        session_id: str,
+        working_dir: str,
+        mcp_servers: list[_ACPMcpServer],
+    ) -> LoadSessionResponse:
+        """``session/load``; the history it replays is neither stored again nor
+        lets an old ``cancel`` grant authorize anything."""
+        subagents = client.subagents
+        if subagents is None:
+            return await conn.load_session(
+                cwd=working_dir, session_id=session_id, mcp_servers=mcp_servers
+            )
+        subagents.root_session_id = session_id
+        subagents.replaying = True
+        try:
+            return await conn.load_session(
+                cwd=working_dir, session_id=session_id, mcp_servers=mcp_servers
+            )
+        finally:
+            subagents.replaying = False
 
     def close_acp_session(self, timeout: float = _ACP_SESSION_CLOSE_TIMEOUT) -> None:
         """Send session/close if the server advertised it; log and ignore errors."""

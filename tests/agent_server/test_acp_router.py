@@ -1,4 +1,5 @@
-"""The ACP routes: previewing an agent's session controls and setting options.
+"""The ACP routes: previewing an agent's session controls, setting options, and
+cancelling one sub-agent session.
 
 The ACP agent behind them is the scripted test agent, run as a real process.
 """
@@ -15,6 +16,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
+import jsonschema
 import pytest
 from fastapi import APIRouter, FastAPI
 
@@ -26,12 +28,14 @@ from openhands.agent_server.conversation_router import conversation_router
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.event_router import event_router
 from openhands.agent_server.event_service import RunSlot
+from openhands.agent_server.openapi import build_public_openapi
 from openhands.agent_server.persistence import reset_stores
 from openhands.agent_server.persistence.store import get_agent_profile_store
 from openhands.agent_server.server_details_router import build_server_info
 from openhands.sdk import LLM, Agent
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.agent.acp_models import ACPConfigOption
+from openhands.sdk.agent.acp_unstable import SubagentClientSideConnection
 from openhands.sdk.profiles.agent_profile import ACPAgentProfile
 from tests.conftest import SCRIPTED_ACP_AGENT, scripted_acp_command
 
@@ -103,6 +107,18 @@ class Server:
             f"/api/conversations/{conversation_id}/acp/config-options",
             json={"config_id": config_id, "value": value},
         )
+
+    async def cancel(self, conversation_id: UUID, session_id: str) -> httpx.Response:
+        return await self.client.post(
+            f"/api/conversations/{conversation_id}/acp/sessions/{session_id}/cancel"
+        )
+
+    async def events(self, conversation_id: UUID) -> list[dict[str, Any]]:
+        response = await self.client.get(
+            f"/api/conversations/{conversation_id}/events/search",
+            params={"limit": 100},
+        )
+        return response.json()["items"]
 
     async def newest_controls(self, conversation_id: UUID) -> dict[str, Any] | None:
         response = await self.client.get(
@@ -451,3 +467,118 @@ async def test_a_set_the_agent_does_not_answer_times_out(server, monkeypatch):
 
 def test_server_info_announces_acp_session_controls():
     assert "acp_session_controls_v1" in build_server_info().capabilities
+
+
+# -- Cancelling one sub-agent session ---------------------------------------------------
+
+
+def subagent_agent(*flags: str) -> dict[str, Any]:
+    return scripted_agent("--subagents", *flags, acp_subagents=True)
+
+
+async def stored_snapshot(
+    server: Server, conversation_id: UUID, child: str, state: str
+) -> dict[str, Any]:
+    async with asyncio.timeout(15):
+        while True:
+            snapshots = [
+                e
+                for e in await server.events(conversation_id)
+                if e["kind"] == "ACPSubagentEvent" and e["acp_session_id"] == child
+            ]
+            if snapshots and snapshots[-1].get("state") == state:
+                return snapshots[-1]
+            await asyncio.sleep(0.05)
+
+
+async def test_a_cancel_reaches_the_child_and_its_cancelled_state_is_stored(
+    server, acp_request_log
+):
+    conversation_id = await server.start(
+        agent=subagent_agent("--cancel-wait", "30"),
+        initial_message={"content": [{"type": "text", "text": "hello"}]},
+    )
+
+    async with asyncio.timeout(20):
+        while (response := await server.cancel(conversation_id, "child-b")).status_code != 200:
+            assert response.status_code in (404, 409), response.text
+            await asyncio.sleep(0.05)
+
+    assert response.json() == {"session_id": "child-b", "requested": True}
+    snapshot = await stored_snapshot(server, conversation_id, "child-b", "idle")
+    assert snapshot["stop_reason"] == "cancelled"
+    assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
+        acp_request_log()
+    )
+
+
+async def test_a_cancel_for_an_unknown_conversation_is_not_found(server):
+    response = await server.cancel(uuid4(), "child-b")
+
+    assert response.status_code == 404
+
+
+async def test_a_cancel_for_an_unknown_session_is_not_found(server):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+
+    response = await server.cancel(conversation_id, "no-such-child")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == (
+        "ACP session no-such-child is not a sub-agent session of this conversation."
+    )
+
+
+async def test_a_cancel_for_a_child_without_a_grant_is_a_conflict(server):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+
+    response = await server.cancel(conversation_id, "child-c")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "ACP session child-c does not accept cancel; cancel the conversation's "
+        "turn instead."
+    )
+
+
+async def test_a_cancel_on_a_conversation_that_is_not_acp_is_a_bad_request(server):
+    conversation_id = await server.start(agent=plain_agent())
+
+    response = await server.cancel(conversation_id, "child-b")
+
+    assert response.status_code == 400
+
+
+async def test_a_cancel_the_agent_does_not_take_in_time_times_out(server, monkeypatch):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+
+    async def never_written(self, session_id: str, **kwargs: Any) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(SubagentClientSideConnection, "cancel", never_written)
+    monkeypatch.setattr(acp_agent_module, "_ACP_SUBAGENT_CANCEL_TIMEOUT", 0.2)
+
+    response = await server.cancel(conversation_id, "child-b")
+
+    assert response.status_code == 504
+
+
+async def test_stored_sub_agent_events_validate_against_the_event_schema(server):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+    await stored_snapshot(server, conversation_id, "child-b", "idle")
+    openapi = build_public_openapi()
+    validator = jsonschema.Draft202012Validator(
+        {"$ref": "#/components/schemas/Event", "components": openapi["components"]}
+    )
+
+    events = await server.events(conversation_id)
+
+    kinds = {event["kind"] for event in events}
+    assert {
+        "ACPSubagentEvent",
+        "ACPSessionMessageEvent",
+        "ACPSessionTextEvent",
+        "ACPToolCallEvent",
+    } <= kinds
+    for event in events:
+        validator.validate(event)

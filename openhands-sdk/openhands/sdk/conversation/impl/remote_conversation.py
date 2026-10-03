@@ -71,6 +71,13 @@ _WEBSOCKET_AUTH_TYPE: Final = "auth"
 _WEBSOCKET_SESSION_API_KEY_FIELD: Final = "session_api_key"
 
 
+def _acp_tool_call_key(event: ACPToolCallEvent) -> str | tuple[str, str]:
+    """The key that merges an ACP call's ``started`` and terminal events."""
+    if event.acp_session_id is None:
+        return event.tool_call_id
+    return (event.acp_session_id, event.tool_call_id)
+
+
 def _agent_kind_mismatch_message(conversation_id: ConversationID) -> str:
     return (
         f"Conversation {conversation_id} was started with a different agent kind. "
@@ -325,7 +332,9 @@ class RemoteEventsList(EventsListBase):
         self._events_base_path = events_base_path
         self._cached_events: list[Event] = []
         self._cached_event_ids: set[str] = set()
-        self._acp_tool_call_id_to_event_id: dict[str, str] = {}
+        # A root call is keyed by its id; a sub-agent's by (session, id), since
+        # ACP tool call ids are unique only within a session.
+        self._acp_tool_call_id_to_event_id: dict[str | tuple[str, str], str] = {}
         self._lock = threading.RLock()
         # Initial fetch to sync existing events
         self._do_full_sync()
@@ -426,16 +435,15 @@ class RemoteEventsList(EventsListBase):
         # fans out one frame per cumulative-output ToolCallProgress, so this is
         # an O(1) two-event merge, not an O(n²) dedup.)
         if isinstance(event, ACPToolCallEvent):
-            existing_id = self._acp_tool_call_id_to_event_id.get(event.tool_call_id)
+            call_key = _acp_tool_call_key(event)
+            existing_id = self._acp_tool_call_id_to_event_id.get(call_key)
             if existing_id is not None:
                 for i, e in enumerate(self._cached_events):
                     if e.id == existing_id:
                         self._cached_events[i] = event
                         self._cached_event_ids.discard(existing_id)
                         self._cached_event_ids.add(event.id)
-                        self._acp_tool_call_id_to_event_id[event.tool_call_id] = (
-                            event.id
-                        )
+                        self._acp_tool_call_id_to_event_id[call_key] = event.id
                         logger.debug(
                             f"Replaced ACP tool call event {existing_id} -> {event.id} "
                             f"(tool_call_id={event.tool_call_id})"
@@ -450,7 +458,7 @@ class RemoteEventsList(EventsListBase):
                     "not found in _cached_events; removing stale entry."
                 )
                 self._cached_event_ids.discard(existing_id)
-                del self._acp_tool_call_id_to_event_id[event.tool_call_id]
+                del self._acp_tool_call_id_to_event_id[call_key]
 
         # Use bisect with key function for O(log N) insertion
         # This ensures events are always ordered correctly even if
@@ -461,7 +469,7 @@ class RemoteEventsList(EventsListBase):
         self._cached_events.insert(insert_pos, event)
         self._cached_event_ids.add(event.id)
         if isinstance(event, ACPToolCallEvent):
-            self._acp_tool_call_id_to_event_id[event.tool_call_id] = event.id
+            self._acp_tool_call_id_to_event_id[_acp_tool_call_key(event)] = event.id
         logger.debug(f"Added event {event.id} to local cache at position {insert_pos}")
 
     def add_event(self, event: Event) -> None:

@@ -1,4 +1,5 @@
-"""ACP session controls: preview what an agent offers, and set its options."""
+"""ACP routes: preview an agent's session controls, set its options, and
+cancel one of its sub-agent sessions."""
 
 from typing import Final
 from uuid import UUID
@@ -14,6 +15,10 @@ from openhands.agent_server.dependencies import get_conversation_service
 from openhands.agent_server.models import StartConversationRequest
 from openhands.sdk.agent.acp_agent import ACPConfigOptionRejectedError
 from openhands.sdk.agent.acp_models import ACPSessionControls
+from openhands.sdk.agent.acp_subagents import (
+    ACPSessionNotCancellableError,
+    ACPSessionNotFoundError,
+)
 from openhands.sdk.conversation.acp_preview import ACPPreviewError
 from openhands.sdk.profiles.resolver import DanglingMcpServerRef, ProfileNotFound
 
@@ -158,3 +163,65 @@ async def set_acp_config_option(
         applied=controls is not None,
         controls=controls or ACPSessionControls(),
     )
+
+
+class CancelACPSessionResponse(BaseModel):
+    """A cancel sent to an ACP sub-agent session; its outcome arrives later."""
+
+    session_id: str = Field(description="The ACP session the cancel was sent for.")
+    requested: bool = Field(
+        default=True,
+        description="Always true; the child's next state update confirms it.",
+    )
+
+
+@conversation_acp_router.post(
+    "/sessions/{session_id}/cancel",
+    responses={
+        400: {"description": "The conversation's agent is not an ACP agent"},
+        404: {"description": "Conversation or ACP sub-agent session not found"},
+        409: {"description": "The ACP session does not accept cancel right now"},
+        504: {"description": "The ACP server did not take the cancel in time"},
+    },
+)
+async def cancel_conversation_acp_session(
+    conversation_id: UUID,
+    session_id: str,
+    conversation_service: ConversationService = Depends(get_conversation_service),
+) -> CancelACPSessionResponse:
+    """Cancel the current work of one ACP sub-agent session.
+
+    Sends ``session/cancel`` for a child session the ACP agent announced with a
+    ``cancel`` capability. The child's next ``ACPSubagentEvent`` (idle, stop
+    reason ``cancelled``) confirms it.
+    """
+    event_service = await conversation_service.get_event_service(conversation_id)
+    if event_service is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    try:
+        await event_service.cancel_acp_session(session_id)
+    except ACPSessionNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"ACP session {session_id} is not a sub-agent session of this "
+                "conversation."
+            ),
+        ) from e
+    except ACPSessionNotCancellableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"ACP session {session_id} does not accept cancel; cancel the "
+                "conversation's turn instead."
+            ),
+        ) from e
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+    except TimeoutError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)
+        ) from e
+    return CancelACPSessionResponse(session_id=session_id)
