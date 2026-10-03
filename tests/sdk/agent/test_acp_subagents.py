@@ -537,6 +537,21 @@ async def test_replay_is_neither_stored_nor_grants_cancel(wire):
         wire.sessions.check_cancel("child-a")
 
 
+async def test_replayed_child_calls_are_never_tracked_nor_failed_later(wire):
+    agent = wire.agent()
+    wire.sessions.replaying = True
+    await wire.send(ROOT, announce("child-a"))
+    await wire.send("child-a", tool_call("c1"))
+    wire.sessions.replaying = False
+
+    wire.bridge.reset()
+    agent._cancel_inflight_tool_calls()
+    await wire.send("child-a", tool_done("c1"))
+
+    assert wire.bridge.accumulated_tool_calls == []
+    assert [e for e in wire.emitted if isinstance(e, ACPToolCallEvent)] == []
+
+
 def stored_snapshot(child: str, **fields: Any) -> ACPSubagentEvent:
     return ACPSubagentEvent(
         acp_session_id=child,

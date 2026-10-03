@@ -1676,12 +1676,13 @@ class _OpenHandsACPBridge:
 
     def _route_child_update(self, child: str, update: Any) -> bool:
         """Store a child's text, usage or other non-tool update; False for a
-        tool call, which takes the shared tool-call path."""
+        tool call, which takes the shared tool-call path. A replayed update,
+        a tool call included, is neither stored nor tracked."""
         assert self.subagents is not None
-        if isinstance(update, ToolCallStart | ToolCallProgress):
-            return False
         if self.subagents.replaying:
             return True
+        if isinstance(update, ToolCallStart | ToolCallProgress):
+            return False
         if isinstance(update, AgentMessageChunk | AgentThoughtChunk):
             if isinstance(update.content, TextContentBlock):
                 self.emit_subagent_events(
