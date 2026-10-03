@@ -458,7 +458,16 @@ def get_canvas_extension_bundle_endpoint(
 
 @canvas_extensions_router.get(
     "/installed/{extension_name}/panels/{panel_id}/icon",
-    responses={404: {"description": "Canvas extension, panel or icon not found"}},
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {
+                media_type: {"schema": {"type": "string", "format": "binary"}}
+                for media_type in PANEL_ICON_MEDIA_TYPES.values()
+            }
+        },
+        404: {"description": "Canvas extension, panel or icon not found"},
+    },
 )
 def get_canvas_extension_panel_icon_endpoint(
     extension_name: CanvasExtensionNamePath,

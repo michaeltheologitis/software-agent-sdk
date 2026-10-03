@@ -15,6 +15,10 @@ Flags:
 - ``--slow-set SECONDS``: wait before answering ``session/set_config_option``.
 - ``--sessions-file PATH``: keep sessions in a JSON file, so that a later
   process can ``session/load`` them.
+- ``--set-error SENTENCE``: answer every ``session/set_config_option`` with an
+  internal error (-32603) whose message is ``SENTENCE``.
+- ``--auth-required``: answer ``session/new`` with ACP's authentication
+  required error (-32000).
 - ``--subagents``: play a sub-agent run (ACP schema 1.24.1's unstable sub-agent
   sessions) on each prompt, before the reply. Its children are ``child-a``
   (with a grandchild, ``child-a-1``), ``child-c`` (which cannot be cancelled)
@@ -88,6 +92,7 @@ from acp.utils import notify_model
 
 AGENT_NAME = "scripted-acp-agent"
 INVALID_PARAMS = -32602
+INTERNAL_ERROR = -32603
 OPTION_ID = "profile"
 PROFILES = ("fast", "thorough")
 COMMANDS_AFTER_NEW_SESSION_DELAY = 0.05
@@ -144,6 +149,8 @@ class ScriptedAgent:
         )
 
     async def new_session(self, cwd: str, **kwargs: Any) -> NewSessionResponse:
+        if self._args.auth_required:
+            raise RequestError.auth_required()
         session_id = uuid.uuid4().hex
         self._sessions[session_id] = {"profile": PROFILES[0], "prompted": False}
         self._write_sessions()
@@ -166,6 +173,8 @@ class ScriptedAgent:
     ) -> SetSessionConfigOptionResponse:
         if self._args.slow_set:
             await asyncio.sleep(self._args.slow_set)
+        if self._args.set_error is not None:
+            raise RequestError(INTERNAL_ERROR, self._args.set_error)
         session = self._session(session_id)
         if config_id != OPTION_ID:
             raise _invalid_params(f"unknown option '{config_id}'")
@@ -694,6 +703,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-commands", action="store_true")
     parser.add_argument("--slow-set", type=float, default=0.0)
     parser.add_argument("--sessions-file", type=Path, default=None)
+    parser.add_argument("--set-error", default=None)
+    parser.add_argument("--auth-required", action="store_true")
     add_subagent_arguments(parser)
     return parser
 
