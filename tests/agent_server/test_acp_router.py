@@ -139,7 +139,9 @@ async def serving(
         api.include_router(acp_router)
         app.include_router(api)
         _add_exception_handlers(app)
-        transport = httpx.ASGITransport(app=app)
+        # Answer an unhandled error with the 500 handler's body, as a deployed
+        # server does, instead of raising it into the test.
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test", timeout=60
         ) as client:
@@ -173,12 +175,13 @@ def scripted_agent(*flags: str, **fields: Any) -> dict[str, Any]:
     return agent.model_dump(mode="json")
 
 
-def scripted_profile_id() -> str:
+def scripted_profile_id(**fields: Any) -> str:
     profile = ACPAgentProfile(
         name="scripted",
         acp_server="custom",
         acp_command=sys.executable,
         acp_args=[str(SCRIPTED_ACP_AGENT)],
+        **fields,
     )
     get_agent_profile_store().save(profile)
     return str(profile.id)
@@ -250,6 +253,25 @@ async def test_the_preview_maps_each_failure_to_its_status(
     assert server.previews_left_behind() == []
 
 
+async def test_the_preview_answers_an_authentication_failure_with_502_not_401(server):
+    response = await server.client.post(
+        "/api/acp/preview",
+        json={
+            "workspace": server.workspace,
+            "agent": scripted_agent("--auth-required"),
+        },
+    )
+
+    assert response.status_code == 502
+    # The agent-server's handler for a 5xx moves the route's detail into
+    # "exception".
+    assert response.json() == {
+        "detail": "Internal Server Error",
+        "exception": "502: [-32000] Authentication required",
+    }
+    assert server.previews_left_behind() == []
+
+
 async def test_the_preview_of_an_unknown_profile_is_not_found(server):
     response = await server.client.post(
         "/api/acp/preview",
@@ -257,6 +279,21 @@ async def test_the_preview_of_an_unknown_profile_is_not_found(server):
     )
 
     assert response.status_code == 404
+
+
+async def test_the_preview_of_a_profile_with_a_dangling_mcp_reference_is_refused(
+    server,
+):
+    profile_id = scripted_profile_id(mcp_server_refs=["no-such-server"])
+
+    response = await server.client.post(
+        "/api/acp/preview",
+        json={"workspace": server.workspace, "agent_profile_id": profile_id},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["dangling_mcp_server_refs"] == ["no-such-server"]
+    assert server.previews_left_behind() == []
 
 
 async def test_the_preview_refuses_the_model_option(server):
@@ -429,10 +466,47 @@ async def test_a_set_that_is_not_for_this_route_is_a_bad_request(
     assert response.status_code == 400
 
 
+async def test_a_set_on_a_service_that_closed_after_its_lookup_is_a_bad_request(
+    server, monkeypatch
+):
+    conversation_id = await server.start(agent=scripted_agent())
+    event_service = await server.service.get_event_service(conversation_id)
+    assert event_service is not None
+    await event_service.close()
+
+    # A looked-up service can close (idle eviction, a delete) before the set
+    # reaches it; a later lookup would start it again.
+    async def the_closed_service(_conversation_id: UUID):
+        return event_service
+
+    monkeypatch.setattr(server.service, "get_event_service", the_closed_service)
+
+    response = await server.set_option(conversation_id, "profile", "fast")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "inactive_service"
+
+
 async def test_a_set_on_an_unknown_conversation_is_not_found(server):
     response = await server.set_option(uuid4(), "profile", "fast")
 
     assert response.status_code == 404
+
+
+async def test_an_internal_error_from_the_agent_is_a_500_carrying_its_message_unmasked(
+    server,
+):
+    sentence = "lost the backend key sk-scripted-1234"
+    conversation_id = await server.start_and_run(
+        agent=scripted_agent("--set-error", sentence),
+        secrets={"BACKEND_KEY": {"kind": "StaticSecret", "value": "sk-scripted-1234"}},
+    )
+
+    response = await server.set_option(conversation_id, "profile", "fast")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Internal Server Error"
+    assert response.json()["exception"] == sentence
 
 
 async def test_a_set_the_agent_does_not_answer_times_out(server, monkeypatch):
