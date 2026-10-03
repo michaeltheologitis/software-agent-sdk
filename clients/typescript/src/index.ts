@@ -70,6 +70,9 @@ export {
   isCondensationEvent,
   isHookExecutionEvent,
   isACPSessionControlsEvent,
+  isACPSubagentEvent,
+  isACPSessionMessageEvent,
+  isACPSessionTextEvent,
 } from './events/types';
 export type {
   EventID,
@@ -84,6 +87,10 @@ export type {
   ACPToolCallStatus,
   ACPToolKind,
   ACPSessionControlsEvent,
+  ACPSubagentEvent,
+  ACPSessionMessageEvent,
+  ACPSessionTextEvent,
+  CancelAcpSessionResponse,
   StreamingDeltaEvent,
   SystemPromptEvent,
   PauseEvent,

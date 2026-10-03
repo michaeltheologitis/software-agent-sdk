@@ -144,6 +144,14 @@ describe('ACP provider credential descriptors', () => {
       expect(ACP_SETTINGS_KEYS).toContain('acp_isolate_data_dir');
     });
 
+    it('forwards the sub-agent opt-in', () => {
+      const settings = { acp_model: 'x', acp_subagents: true };
+      const forwarded = Object.fromEntries(
+        Object.entries(settings).filter(([key]) => ACP_SETTINGS_KEYS.includes(key))
+      );
+      expect(forwarded).toEqual(settings);
+    });
+
     it('keeps the isolation flag when filtering a settings payload', () => {
       const settings = { acp_model: 'x', acp_isolate_data_dir: true };
       const forwarded = Object.fromEntries(

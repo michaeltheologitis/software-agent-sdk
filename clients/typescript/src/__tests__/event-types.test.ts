@@ -26,6 +26,9 @@ import {
   isAgentErrorEvent,
   isObservationLike,
   isACPSessionControlsEvent,
+  isACPSubagentEvent,
+  isACPSessionMessageEvent,
+  isACPSessionTextEvent,
   acpSessionControlsOf,
   generateEventId,
 } from '../events/types';
@@ -451,5 +454,65 @@ describe('ACPSessionControlsEvent', () => {
       available_commands: controlsEvent.available_commands,
       config_options: [],
     });
+  });
+});
+
+describe('ACP sub-agent session events', () => {
+  // As the events search returns them: null fields left out.
+  const stored = [
+    {
+      id: 'e1',
+      timestamp: '2026-10-02T14:22:33.100000',
+      source: 'agent',
+      kind: 'ACPSubagentEvent',
+      acp_session_id: 'child-a',
+      parent_tool_call_id: 'cell-1',
+      title: 'Summarize part A',
+      state: 'running',
+      cancellable: true,
+      meta: { openhands: { parentToolCallId: 'cell-1' } },
+    },
+    {
+      id: 'e2',
+      timestamp: '2026-10-02T14:22:33.200000',
+      source: 'agent',
+      kind: 'ACPSessionMessageEvent',
+      message_id: 'child-a-task',
+      sender_session_id: 's-root',
+      recipient_session_id: 'child-a',
+      text: 'Summarize part A.',
+    },
+    {
+      id: 'e3',
+      timestamp: '2026-10-02T14:22:33.300000',
+      source: 'agent',
+      kind: 'ACPSessionTextEvent',
+      acp_session_id: 'child-a',
+      thought: true,
+      text: 'Reading part A.',
+    },
+  ];
+
+  it('sub-agent event shapes accept stored events', () => {
+    const [association, message, text] = stored;
+
+    expect(isACPSubagentEvent(association)).toBe(true);
+    expect(isACPSessionMessageEvent(message)).toBe(true);
+    expect(isACPSessionTextEvent(text)).toBe(true);
+    if (isACPSubagentEvent(association) && isACPSessionTextEvent(text)) {
+      expect(association.parent_session_id ?? null).toBeNull();
+      expect(association.parent_tool_call_id).toBe('cell-1');
+      expect(text.acp_session_id).toBe(association.acp_session_id);
+    }
+  });
+
+  it('each guard recognises only its own kind', () => {
+    const guards = [isACPSubagentEvent, isACPSessionMessageEvent, isACPSessionTextEvent];
+
+    expect(stored.map((event) => guards.map((guard) => guard(event)))).toEqual([
+      [true, false, false],
+      [false, true, false],
+      [false, false, true],
+    ]);
   });
 });

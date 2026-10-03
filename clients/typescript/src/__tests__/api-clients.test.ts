@@ -2063,6 +2063,61 @@ describe('Auxiliary API clients', () => {
     });
   });
 
+  describe('ACP sub-agent sessions', () => {
+    const answer = (sessionId: string) => {
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ session_id: sessionId, requested: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      ) as typeof fetch;
+    };
+
+    it('ConversationClient.cancelAcpSession posts to the session cancel endpoint', async () => {
+      answer('child-b');
+
+      const result = await new ConversationClient({
+        host: 'http://example.com',
+      }).cancelAcpSession('conversation-1', 'child-b');
+
+      expect(result).toEqual({ session_id: 'child-b', requested: true });
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://example.com/api/conversations/conversation-1/acp/sessions/child-b/cancel',
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+
+    it('ConversationClient.cancelAcpSession encodes the session id', async () => {
+      answer('run/7 a');
+
+      await new ConversationClient({ host: 'http://example.com' }).cancelAcpSession(
+        'conversation-1',
+        'run/7 a'
+      );
+
+      expect((global.fetch as Mock).mock.calls[0][0]).toBe(
+        'http://example.com/api/conversations/conversation-1/acp/sessions/run%2F7%20a/cancel'
+      );
+    });
+
+    it('RemoteConversation.cancelAcpSession posts for its conversation', async () => {
+      const agent = new Agent({ llm: { model: 'gpt-4o', api_key: 'k' } });
+      const workspace = new RemoteWorkspace({ host: 'http://example.com', workingDir: '/tmp' });
+      const conversation = new RemoteConversation(agent, workspace, {
+        conversationId: 'conv-123',
+      });
+      answer('child-b');
+
+      const result = await conversation.cancelAcpSession('child-b');
+
+      expect(result.requested).toBe(true);
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://example.com/api/conversations/conv-123/acp/sessions/child-b/cancel',
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+  });
+
   it('ConversationClient.navigateConversation POSTs event_id and returns the re-rooted info', async () => {
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ id: 'conversation-1', leaf_event_id: 'event-7' }), {

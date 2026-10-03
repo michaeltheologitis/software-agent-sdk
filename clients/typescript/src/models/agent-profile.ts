@@ -76,6 +76,8 @@ export interface ACPAgentProfile extends AgentProfileBase {
   acp_prompt_timeout: number;
   acp_command: string | null;
   acp_args: string[] | null;
+  /** Persist the ACP agent's sub-agent sessions; absent from older servers. */
+  acp_subagents?: boolean;
 }
 
 /**
