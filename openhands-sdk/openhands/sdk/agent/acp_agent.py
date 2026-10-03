@@ -38,7 +38,7 @@ from collections.abc import (
 )
 from concurrent.futures import Future
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from acp.client.connection import ClientSideConnection
 from acp.exceptions import RequestError as ACPRequestError
@@ -78,6 +78,8 @@ from acp.schema import (
 )
 from acp.transports import default_environment
 from pydantic import (
+    AfterValidator,
+    BaseModel,
     Field,
     PrivateAttr,
     SecretStr,
@@ -97,8 +99,6 @@ from openhands.sdk.agent.acp_file_credentials import (
     write_secret_file,
 )
 from openhands.sdk.agent.acp_models import (
-    ACPAvailableCommand,
-    ACPConfigOption,
     ACPModelInfo,
     ACPSessionControls,
 )
@@ -195,7 +195,7 @@ _ACP_CANCEL_DRAIN_TIMEOUT: float = float(
 
 _ACP_AUTH_TIMEOUT: float = float(os.environ.get("ACP_AUTH_TIMEOUT", "30.0"))
 # Bound for one session/set_config_option round-trip. Shorter than the prompt
-# timeout: the call holds the conversation lock and answers a click in a picker.
+# timeout: the call holds the conversation lock while a user waits on it.
 _ACP_CONFIG_OPTION_TIMEOUT: float = float(
     os.environ.get("ACP_CONFIG_OPTION_TIMEOUT", "30.0")
 )
@@ -602,15 +602,10 @@ _CODEX_REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
 class ACPConfigOptionRejectedError(ValueError):
     """The ACP server refused a session/set_config_option.
 
-    ``str()`` is the server's own message, masked; clients show it as it is.
+    ``str()`` is the server's own message, masked.
     """
 
-    def __init__(
-        self,
-        config_id: str,
-        value: str | bool,
-        message: str,
-    ) -> None:
+    def __init__(self, config_id: str, value: str | bool, message: str) -> None:
         super().__init__(message)
         self.config_id = config_id
         self.value = value
@@ -626,6 +621,17 @@ def _check_config_option_id(config_id: str) -> None:
         )
 
 
+def _check_config_option_ids(values: dict[str, str | bool]) -> dict[str, str | bool]:
+    for config_id in values:
+        _check_config_option_id(config_id)
+    return values
+
+
+ACPConfigOptionValues = Annotated[
+    dict[str, str | bool], AfterValidator(_check_config_option_ids)
+]
+
+
 async def _apply_config_options(
     conn: ClientSideConnection,
     session_id: str,
@@ -634,9 +640,7 @@ async def _apply_config_options(
     on_config_options: Callable[[str, Sequence[Any]], None],
     mask: Callable[[Any], Any],
 ) -> None:
-    """Set each value in order, recording every response.
-
-    Every response is recorded, because setting one option may change others.
+    """Set each value in order, recording every response: one may change others.
 
     Raises:
         ACPConfigOptionRejectedError: The server refused a value (any
@@ -1443,7 +1447,7 @@ class _OpenHandsACPBridge:
         # thread can keep the one it got. Written only on the portal thread.
         self._session_controls: dict[str, ACPSessionControls] = {}
         self._commands_reported: dict[str, threading.Event] = {}
-        # Bound by ACPAgent to publish the root session's controls.
+        # Called after every recorded change.
         self.on_session_controls_changed: Callable[[], None] | None = None
         # Sub-agent sessions (ACPAgent.acp_subagents); None routes as before.
         self.subagents: ACPSubagentSessions | None = (
@@ -1556,53 +1560,36 @@ class _OpenHandsACPBridge:
             raise self._masking_error
 
     def record_available_commands(
-        self,
-        session_id: str,
-        commands: Sequence[Any],
+        self, session_id: str, commands: Sequence[Any]
     ) -> None:
         """Mask, normalize and store a session's commands; then notify."""
         parsed = ACPSessionControls.parse_commands(commands)
-        masked = self._mask_value([command.model_dump() for command in parsed])
-        self._session_controls[session_id] = self.session_controls(
-            session_id
-        ).model_copy(
-            update={
-                "available_commands": [
-                    ACPAvailableCommand.model_validate(command) for command in masked
-                ]
-            }
-        )
+        self._store_session_controls(session_id, "available_commands", parsed)
         self._commands_reported.setdefault(session_id, threading.Event()).set()
         self._notify_session_controls_changed()
 
-    def record_config_options(
-        self,
-        session_id: str,
-        options: Sequence[Any],
-    ) -> None:
+    def record_config_options(self, session_id: str, options: Sequence[Any]) -> None:
         """Mask, normalize and store a session's config options; then notify."""
         parsed = ACPSessionControls.parse_config_options(options)
-        masked = self._mask_value([option.model_dump() for option in parsed])
-        self._session_controls[session_id] = self.session_controls(
-            session_id
-        ).model_copy(
-            update={
-                "config_options": [
-                    ACPConfigOption.model_validate(option) for option in masked
-                ]
-            }
-        )
+        self._store_session_controls(session_id, "config_options", parsed)
         self._notify_session_controls_changed()
+
+    def _store_session_controls(
+        self,
+        session_id: str,
+        field: Literal["available_commands", "config_options"],
+        entries: Sequence[BaseModel],
+    ) -> None:
+        """Replace one list of the session's snapshot with ``entries``, masked."""
+        snapshot = self.session_controls(session_id).model_dump()
+        snapshot[field] = self._mask_value([entry.model_dump() for entry in entries])
+        self._session_controls[session_id] = ACPSessionControls.model_validate(snapshot)
 
     def session_controls(self, session_id: str) -> ACPSessionControls:
         """The session's latest snapshot; empty if it has reported nothing."""
         return self._session_controls.get(session_id) or ACPSessionControls()
 
-    def wait_for_available_commands(
-        self,
-        session_id: str,
-        timeout: float,
-    ) -> bool:
+    def wait_for_available_commands(self, session_id: str, timeout: float) -> bool:
         """Block until the session has reported commands once, or the timeout."""
         reported = self._commands_reported.setdefault(session_id, threading.Event())
         return reported.wait(timeout)
@@ -2126,7 +2113,7 @@ class ACPAgent(AgentBase):
             "set_session_model. If None, the server picks its default."
         ),
     )
-    acp_config_options: dict[str, str | bool] = Field(
+    acp_config_options: ACPConfigOptionValues = Field(
         default_factory=dict,
         description=(
             "Session config option values to set with session/set_config_option "
@@ -2135,17 +2122,6 @@ class ACPAgent(AgentBase):
             "acp_model, never here."
         ),
     )
-
-    @field_validator("acp_config_options")
-    @classmethod
-    def _reject_model_config_option(
-        cls,
-        value: dict[str, str | bool],
-    ) -> dict[str, str | bool]:
-        for config_id in value:
-            _check_config_option_id(config_id)
-        return value
-
     acp_resume_session_id: str | None = Field(
         default=None,
         description=(
@@ -2358,8 +2334,8 @@ class ACPAgent(AgentBase):
         default_factory=set
     )
     _atexit_callback: Callable[[], None] | None = PrivateAttr(default=None)
-    # Where the root session's commands and options are published (bound by
-    # LocalConversation), and the ordering state of _publish_session_controls.
+    # The sink for the root session's controls (None publishes nothing), and the
+    # ordering state of _publish_session_controls.
     _on_session_event: Callable[[Event], None] | None = PrivateAttr(default=None)
     _session_controls_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _published_session_controls: ACPSessionControls | None = PrivateAttr(default=None)
@@ -5014,14 +4990,11 @@ class ACPAgent(AgentBase):
         )
 
     def set_acp_config_option(
-        self,
-        config_id: str,
-        value: str | bool,
+        self, config_id: str, value: str | bool
     ) -> ACPSessionControls:
         """Set one option on the live session; return the resulting controls.
 
-        The low-level primitive: :meth:`LocalConversation.set_acp_config_option`
-        also persists the value on the agent.
+        Only the session changes; ``acp_config_options`` keeps its values.
 
         Raises:
             ValueError: ``config_id`` is empty or ``"model"``.
@@ -5130,8 +5103,7 @@ class ACPAgent(AgentBase):
         assert self._session_id is not None
         try:
             self._executor.run_async(
-                self._conn.close_session(session_id=self._session_id),
-                timeout=timeout,
+                self._conn.close_session(session_id=self._session_id), timeout=timeout
             )
         except Exception as e:
             logger.debug("ACP session/close failed: %s", e)

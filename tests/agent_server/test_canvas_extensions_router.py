@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from openhands.agent_server.canvas_extensions.bridge import AppBackendSessionStore
 from openhands.agent_server.canvas_extensions_router import canvas_extensions_router
+from openhands.agent_server.server_details_router import build_server_info
 
 from .canvas_extensions.conftest import write_extension
 
@@ -611,29 +612,21 @@ def test_the_icon_route_serves_the_icon_with_its_type_and_safe_headers(
 
 
 @pytest.mark.parametrize(
-    "extension, panel_id",
-    [("ghost", "decompositions"), ("demo-extension", "no-such-panel")],
-    ids=["unknown-extension", "unknown-panel"],
+    "panel, extension, panel_id",
+    [
+        (PANEL, "ghost", "decompositions"),
+        (PANEL, "demo-extension", "no-such-panel"),
+        ({**PANEL, "icon": None}, "demo-extension", "decompositions"),
+    ],
+    ids=["unknown-extension", "unknown-panel", "no-icon"],
 )
-def test_the_icon_route_is_not_found_for_unknown_names(
-    client: TestClient, tmp_path: Path, extension: str, panel_id: str
+def test_the_icon_route_is_not_found_without_an_extension_panel_or_icon(
+    client: TestClient, tmp_path: Path, panel: dict, extension: str, panel_id: str
 ):
-    _install_with_panel(client, tmp_path)
+    _install_with_panel(client, tmp_path, panel)
 
     response = client.get(
         f"/canvas-extensions/installed/{extension}/panels/{panel_id}/icon"
-    )
-
-    assert response.status_code == 404
-
-
-def test_the_icon_route_is_not_found_for_a_panel_without_an_icon(
-    client: TestClient, tmp_path: Path
-):
-    _install_with_panel(client, tmp_path, {**PANEL, "icon": None})
-
-    response = client.get(
-        "/canvas-extensions/installed/demo-extension/panels/decompositions/icon"
     )
 
     assert response.status_code == 404
@@ -659,6 +652,4 @@ def test_the_icon_route_rechecks_containment_on_every_request(
 
 
 def test_server_info_announces_conversation_panels():
-    from openhands.agent_server.server_details_router import build_server_info
-
     assert "canvas_conversation_panels_v1" in build_server_info().capabilities

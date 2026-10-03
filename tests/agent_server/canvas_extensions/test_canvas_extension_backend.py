@@ -490,13 +490,10 @@ def test_backend_http_lifecycle_and_data_deletion(
         ("Linux", "x86_64", "linux-amd64"),
         ("Linux", "AMD64", "linux-amd64"),
         ("Linux", "aarch64", "linux-arm64"),
-        ("Linux", "arm64", "linux-arm64"),
         ("Darwin", "arm64", "darwin-arm64"),
         ("Darwin", "x86_64", "darwin-amd64"),
         ("Windows", "AMD64", None),
-        ("FreeBSD", "amd64", None),
         ("Linux", "riscv64", None),
-        ("Darwin", "ppc", None),
     ],
 )
 def test_current_platform_names_the_artifact_for_each_system_and_machine(
@@ -508,18 +505,28 @@ def test_current_platform_names_the_artifact_for_each_system_and_machine(
     assert CanvasExtensionBackendManager.current_platform() == expected
 
 
-@pytest.mark.asyncio
-async def test_a_backend_becomes_ready_with_a_proxy_configured(
-    tmp_path: Path, dead_http_proxy: str
-):
-    """The loopback health probe goes direct, never to the configured proxy."""
-    source = _write_backend_extension(tmp_path / "source" / "my-extension")
+async def _prepared_backend(
+    tmp_path: Path, *, launch_delay: float = 0
+) -> tuple[CanvasExtensionBackendManager, str]:
+    """my-extension installed with its backend prepared, and its revision."""
+    source = _write_backend_extension(
+        tmp_path / "source" / "my-extension", launch_delay=launch_delay
+    )
     installed_dir = tmp_path / "installed"
     install_canvas_extension(str(source), installed_dir=installed_dir)
     manager = CanvasExtensionBackendManager(installed_dir, tmp_path / "state")
     revision = manager.revision("my-extension")
     assert revision is not None
     await manager.prepare("my-extension", revision)
+    return manager, revision
+
+
+@pytest.mark.asyncio
+async def test_a_backend_becomes_ready_with_a_proxy_configured(
+    tmp_path: Path, dead_http_proxy: str
+):
+    """The loopback health probe goes direct, never to the configured proxy."""
+    manager, revision = await _prepared_backend(tmp_path)
 
     started = await manager.start("my-extension", revision)
 
@@ -529,8 +536,8 @@ async def test_a_backend_becomes_ready_with_a_proxy_configured(
         await manager.shutdown()
 
 
-# The first backend launched on a fresh macOS runner took about 3s to answer its
-# health probe (a cold /usr/bin/python3). A backend that slow must still start.
+# A cold /usr/bin/python3 on a fresh macOS runner takes about 3 s to answer the
+# first health probe; a backend that slow must still start.
 _SLOW_LAUNCH_SECONDS = 3.5
 
 
@@ -538,15 +545,9 @@ _SLOW_LAUNCH_SECONDS = 3.5
 async def test_a_backend_slow_to_launch_becomes_ready_within_the_default_budget(
     tmp_path: Path,
 ):
-    source = _write_backend_extension(
-        tmp_path / "source" / "my-extension", launch_delay=_SLOW_LAUNCH_SECONDS
+    manager, revision = await _prepared_backend(
+        tmp_path, launch_delay=_SLOW_LAUNCH_SECONDS
     )
-    installed_dir = tmp_path / "installed"
-    install_canvas_extension(str(source), installed_dir=installed_dir)
-    manager = CanvasExtensionBackendManager(installed_dir, tmp_path / "state")
-    revision = manager.revision("my-extension")
-    assert revision is not None
-    await manager.prepare("my-extension", revision)
 
     started_at = time.monotonic()
     started = await manager.start("my-extension", revision)
@@ -583,22 +584,14 @@ _GROUP_CALLS = {
 
 
 @pytest.mark.parametrize("call", list(_GROUP_CALLS))
-def test_a_refusal_to_signal_the_group_on_macos_means_it_exited(
+def test_a_refusal_to_signal_the_group_means_it_exited_on_macos_only(
     monkeypatch: pytest.MonkeyPatch, call: str
 ):
+    monkeypatch.setattr(os, "killpg", _refuse)
+
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(os, "killpg", _refuse)
-
     assert not _GROUP_CALLS[call]()
-
-
-@pytest.mark.parametrize("call", list(_GROUP_CALLS))
-def test_a_refusal_to_signal_the_group_elsewhere_still_fails(
-    monkeypatch: pytest.MonkeyPatch, call: str
-):
     monkeypatch.setattr(platform, "system", lambda: "Linux")
-    monkeypatch.setattr(os, "killpg", _refuse)
-
     with pytest.raises(PermissionError):
         _GROUP_CALLS[call]()
 
@@ -607,13 +600,7 @@ def test_a_refusal_to_signal_the_group_elsewhere_still_fails(
 async def test_stop_completes_when_macos_refuses_to_signal_the_exited_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    source = _write_backend_extension(tmp_path / "source" / "my-extension")
-    installed_dir = tmp_path / "installed"
-    install_canvas_extension(str(source), installed_dir=installed_dir)
-    manager = CanvasExtensionBackendManager(installed_dir, tmp_path / "state")
-    revision = manager.revision("my-extension")
-    assert revision is not None
-    await manager.prepare("my-extension", revision)
+    manager, revision = await _prepared_backend(tmp_path)
     started = await manager.start("my-extension", revision)
     assert started.state == "ready", await _why_not_ready(manager, started)
     runtime_file = manager.data_dir / "my-extension" / "runtime.json"

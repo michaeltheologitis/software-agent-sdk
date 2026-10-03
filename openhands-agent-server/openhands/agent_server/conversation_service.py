@@ -50,7 +50,6 @@ from openhands.agent_server.telemetry.sanitizer import model_family, safe_token
 from openhands.agent_server.utils import safe_rmtree, utc_now
 from openhands.sdk import LLM, AgentContext, Event, Message
 from openhands.sdk.agent import ACPAgent
-from openhands.sdk.agent.acp_agent import _check_config_option_id
 from openhands.sdk.agent.acp_file_credentials import CODEX_AUTH_SECRET_NAME
 from openhands.sdk.agent.acp_models import ACPSessionControls
 from openhands.sdk.agent.base import AgentBase
@@ -1846,10 +1845,9 @@ class ConversationService:
         return conversation_info, True
 
     async def _resolve_launch(
-        self,
-        request: StartConversationRequest,
+        self, request: StartConversationRequest
     ) -> tuple[StartConversationRequest, LaunchedAgentProfile | None]:
-        """The agent-resolution steps shared by a start and a preview.
+        """Resolve the request's agent as its launch will run it.
 
         Settings, profile resolution and its secret allow-list, load_memory,
         ACP skill sourcing and launch additions, then the acp_config_options
@@ -1949,9 +1947,6 @@ class ConversationService:
                 raise InvalidACPConfigOptions(
                     "acp_config_options requires an ACP agent"
                 )
-            # model_copy skips validators, so the model option is refused here.
-            for config_id in request.acp_config_options:
-                _check_config_option_id(config_id)
             agent = request.agent.model_copy(
                 update={
                     "acp_config_options": {
@@ -1964,8 +1959,7 @@ class ConversationService:
         return request, launched_agent_profile
 
     async def preview_acp_session(
-        self,
-        request: StartConversationRequest,
+        self, request: StartConversationRequest
     ) -> ACPSessionControls:
         """What an ACP agent would offer for this start request, before it exists.
 

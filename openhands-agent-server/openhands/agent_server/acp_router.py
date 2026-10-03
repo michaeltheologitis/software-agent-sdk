@@ -25,8 +25,7 @@ from openhands.sdk.profiles.resolver import DanglingMcpServerRef, ProfileNotFoun
 
 acp_router = APIRouter(prefix="/acp", tags=["ACP"])
 conversation_acp_router = APIRouter(
-    prefix="/conversations/{conversation_id}/acp",
-    tags=["ACP"],
+    prefix="/conversations/{conversation_id}/acp", tags=["ACP"]
 )
 
 # Never 401 for an agent's authentication failure: clients read 401 as their
@@ -42,8 +41,7 @@ class ACPConfigOptionSetRequest(BaseModel):
     """Set one ACP session config option."""
 
     config_id: str = Field(
-        min_length=1,
-        description="The option's id, as the agent reports it.",
+        min_length=1, description="The option's id, as the agent reports it."
     )
     value: str | bool = Field(
         description="A select option's value, or a boolean option's value.",
@@ -160,8 +158,7 @@ async def set_acp_config_option(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)
         ) from e
     return ACPConfigOptionSetResponse(
-        applied=controls is not None,
-        controls=controls or ACPSessionControls(),
+        applied=controls is not None, controls=controls or ACPSessionControls()
     )
 
 

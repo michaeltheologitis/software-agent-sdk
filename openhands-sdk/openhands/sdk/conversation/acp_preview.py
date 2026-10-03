@@ -30,16 +30,11 @@ PREVIEW_COMMANDS_WAIT_SECONDS: Final[float] = 2.0
 class ACPPreviewError(RuntimeError):
     """The agent could not be previewed.
 
-    ``code`` is the ConversationErrorEvent code a start would have reported
-    (``ACPConfigOptionRejected``, ``ACPStartupTimeout``, ``ACPAuthRequired``,
-    ``ACPSpawnError`` or ``ACPInitError``); ``detail`` is redacted and masked.
+    ``code`` is the ConversationErrorEvent code a start would have reported;
+    ``detail`` is redacted and masked.
     """
 
-    def __init__(
-        self,
-        code: str,
-        detail: str,
-    ) -> None:
+    def __init__(self, code: str, detail: str) -> None:
         super().__init__(detail)
         self.code = code
         self.detail = detail

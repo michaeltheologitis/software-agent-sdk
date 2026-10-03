@@ -2026,9 +2026,7 @@ class EventService:
         await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
 
     async def set_acp_config_option(
-        self,
-        config_id: str,
-        value: str | bool,
+        self, config_id: str, value: str | bool
     ) -> ACPSessionControls | None:
         """Run LocalConversation.set_acp_config_option off the event loop.
 

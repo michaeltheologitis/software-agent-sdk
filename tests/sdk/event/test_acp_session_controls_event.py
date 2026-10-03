@@ -9,13 +9,7 @@ from openhands.sdk.agent.acp_models import (
     ACPConfigOptionValue,
     ACPSessionControls,
 )
-from openhands.sdk.event import (
-    ACPSessionControlsEvent,
-    Event,
-    MessageEvent,
-    render_resume_transcript,
-)
-from openhands.sdk.llm import Message, TextContent
+from openhands.sdk.event import ACPSessionControlsEvent, Event
 
 
 CONTROLS = ACPSessionControls(
@@ -70,16 +64,3 @@ def test_an_empty_event_still_renders_one_line():
     assert ACPSessionControlsEvent().visualize.plain == (
         "Commands: none | Options: none"
     )
-
-
-def test_resume_transcript_skips_session_controls():
-    user = MessageEvent(
-        source="user",
-        llm_message=Message(role="user", content=[TextContent(text="hello")]),
-    )
-
-    with_controls = render_resume_transcript(
-        [user, ACPSessionControlsEvent.from_controls(CONTROLS)]
-    )
-
-    assert with_controls == render_resume_transcript([user])

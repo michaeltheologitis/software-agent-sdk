@@ -97,15 +97,10 @@ class ACPAvailableCommand(BaseModel):
     ``/<name>``; the bridge forwards that text unchanged.
     """
 
-    name: str = Field(
-        description="Command name, without the leading slash.",
-    )
-    description: str = Field(
-        description="What the command does, in the agent's words.",
-    )
+    name: str = Field(description="Command name, without the leading slash.")
+    description: str = Field(description="What the command does, in the agent's words.")
     input: ACPCommandInput | None = Field(
-        default=None,
-        description="Present when the command takes text after its name.",
+        default=None, description="Present when the command takes text after its name."
     )
 
     @classmethod
@@ -126,12 +121,9 @@ class ACPConfigOptionValue(BaseModel):
     value: str = Field(
         description="The value to send back in session/set_config_option.",
     )
-    name: str = Field(
-        description="Human-readable label for the value.",
-    )
+    name: str = Field(description="Human-readable label for the value.")
     description: str | None = Field(
-        default=None,
-        description="Optional longer description supplied by the agent.",
+        default=None, description="Optional longer description supplied by the agent."
     )
     group: str | None = Field(
         default=None,
@@ -149,9 +141,7 @@ class ACPConfigOption(BaseModel):
     id: str = Field(
         description="The option's id, the configId of session/set_config_option.",
     )
-    name: str = Field(
-        description="Human-readable label for the option.",
-    )
+    name: str = Field(description="Human-readable label for the option.")
     type: ACPConfigOptionType = Field(
         description="'select' (one of options) or 'boolean'.",
     )
@@ -159,8 +149,7 @@ class ACPConfigOption(BaseModel):
         description="The current value: a str for a select, a bool for a boolean.",
     )
     description: str | None = Field(
-        default=None,
-        description="Optional description for the client to display.",
+        default=None, description="Optional description for the client to display."
     )
     category: str | None = Field(
         default=None,

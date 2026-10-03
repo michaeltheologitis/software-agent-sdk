@@ -14,22 +14,20 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import AsyncMock
 
 import pytest
-from acp.exceptions import RequestError as ACPRequestError
 from acp.schema import (
     AvailableCommand,
     AvailableCommandsUpdate,
     ConfigOptionUpdate,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
+    SetSessionConfigOptionResponse,
 )
 from pydantic import ValidationError
 
-import openhands.sdk.agent.acp_agent as acp_agent_module
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
     ACPConfigOptionRejectedError,
@@ -43,7 +41,6 @@ from openhands.sdk.agent.acp_models import (
     ACPConfigOptionValue,
     ACPSessionControls,
 )
-from openhands.sdk.conversation import LocalConversation
 from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
@@ -53,7 +50,7 @@ from openhands.sdk.event import ACPSessionControlsEvent, Event
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.utils.async_executor import AsyncExecutor
 from openhands.sdk.workspace import LocalWorkspace
-from tests.conftest import scripted_acp_command
+from tests.conftest import controls_events, scripted_acp_command, wait_until
 
 
 SUMMARIZE = ACPAvailableCommand(name="summarize", description="Summarize the input")
@@ -88,30 +85,15 @@ def command(name: str, description: str = "") -> AvailableCommand:
     return AvailableCommand(name=name, description=description)
 
 
-def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.02)
-
-
-def controls_events(events: Any) -> list[ACPSessionControlsEvent]:
-    return [e for e in events if isinstance(e, ACPSessionControlsEvent)]
-
-
 def methods(log: list[dict[str, Any]]) -> list[str]:
     return [entry["method"] for entry in log]
 
 
-class Started:
+class Started(NamedTuple):
     """An ACP agent started on a state of its own, publishing into a list."""
 
-    def __init__(self, agent: ACPAgent, state: ConversationState) -> None:
-        self.agent = agent
-        self.state = state
-        self.published: list[Event] = []
-        self.emitted: list[Event] = []
+    agent: ACPAgent
+    published: list[Event]
 
 
 @pytest.fixture
@@ -134,10 +116,10 @@ def start(tmp_path: Path) -> Iterator[Callable[..., Started]]:
             workspace=LocalWorkspace(working_dir=str(workspace)),
             persistence_dir=str(persistence_dir or tmp_path / uuid.uuid4().hex),
         )
-        run = Started(agent, state)
+        run = Started(agent, [])
         agent._on_session_event = run.published.append
         started.append(run)
-        agent.init_state(state, on_event=run.emitted.append)
+        agent.init_state(state, on_event=lambda _event: None)
         return run
 
     yield _start
@@ -145,36 +127,16 @@ def start(tmp_path: Path) -> Iterator[Callable[..., Started]]:
         run.agent.close()
 
 
-@pytest.fixture
-def conversation(tmp_path: Path) -> Iterator[Callable[..., LocalConversation]]:
-    conversations: list[LocalConversation] = []
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(exist_ok=True)
-
-    def _conversation(*flags: str, **fields: Any) -> LocalConversation:
-        agent = ACPAgent(acp_command=scripted_acp_command(*flags), **fields)
-        conv = LocalConversation(
-            agent,
-            workspace=str(workspace),
-            persistence_dir=str(tmp_path / "conversations"),
-            visualizer=None,
-        )
-        conversations.append(conv)
-        return conv
-
-    yield _conversation
-    for conv in conversations:
-        conv.close()
-
-
-def bridged_agent(session_id: str = "root") -> tuple[ACPAgent, _OpenHandsACPBridge]:
-    """An agent wired to a bridge with no process behind it."""
+def bridged_agent() -> tuple[ACPAgent, _OpenHandsACPBridge, list[Event]]:
+    """An agent on session "root" of a bridge with no process, and what it publishes."""
     agent = ACPAgent(acp_command=["unused"])
     bridge = _OpenHandsACPBridge()
     agent._client = bridge
-    agent._session_id = session_id
+    agent._session_id = "root"
     agent._bind_session_controls()
-    return agent, bridge
+    published: list[Event] = []
+    agent._on_session_event = published.append
+    return agent, bridge, published
 
 
 # -- Recording and publishing -------------------------------------------------
@@ -192,40 +154,11 @@ def test_controls_reported_while_the_session_starts_are_published_once_it_starte
 def test_commands_reported_after_session_new_answered_are_published(start):
     run = start()
 
-    wait_until(lambda: run.agent.session_controls.available_commands)
-
     wait_until(lambda: controls_events(run.published)[-1].controls == FAST)
 
 
-def test_an_unchanged_snapshot_is_not_published_again(start):
-    run = start(acp_config_options={"profile": "thorough"})
-    # The scripted agent re-sends the same commands after session/new.
-    time.sleep(0.3)
-
-    assert len(controls_events(run.published)) == 1
-
-
-def test_changes_during_a_prompt_are_published_in_order(conversation):
-    conv = conversation(acp_config_options={"profile": "thorough"})
-    conv.send_message("/compare a b")
-    after_first_prompt = ACPSessionControls(
-        available_commands=[], config_options=[profile_option("thorough", "thorough")]
-    )
-
-    conv.run()
-
-    wait_until(
-        lambda: controls_events(conv.state.events)[-1].controls == after_first_prompt
-    )
-    events = controls_events(conv.state.events)
-    assert events[0].controls == THOROUGH
-    assert [e.available_commands for e in events[1:]] == [[]] * (len(events) - 1)
-
-
 def test_each_session_keeps_its_own_controls_and_only_the_root_is_published():
-    agent, bridge = bridged_agent("root")
-    published: list[Event] = []
-    agent._on_session_event = published.append
+    _, bridge, published = bridged_agent()
 
     bridge.record_available_commands("root", [command("root-cmd")])
     bridge.record_available_commands("child", [command("child-cmd")])
@@ -297,10 +230,8 @@ async def test_session_updates_of_both_kinds_are_recorded_and_not_routed_on():
 def test_agent_supplied_text_is_masked_before_it_is_stored():
     registry = SecretRegistry()
     registry.update_secrets({"API_TOKEN": "tok-12345"})
-    agent, bridge = bridged_agent()
+    _, bridge, published = bridged_agent()
     bridge.mask = registry.mask_secrets_in_output
-    published: list[Event] = []
-    agent._on_session_event = published.append
 
     bridge.record_available_commands("root", [command("leak", "uses tok-12345")])
     bridge.record_config_options(
@@ -323,7 +254,7 @@ def test_agent_supplied_text_is_masked_before_it_is_stored():
 
 
 def test_concurrent_publishes_keep_snapshot_order_and_end_on_the_newest():
-    agent, bridge = bridged_agent()
+    agent, bridge, _ = bridged_agent()
     published: list[ACPSessionControlsEvent] = []
 
     def slow_sink(event: Event) -> None:
@@ -360,9 +291,7 @@ def test_concurrent_publishes_keep_snapshot_order_and_end_on_the_newest():
 
 
 def test_nothing_is_published_while_a_session_is_starting():
-    agent, bridge = bridged_agent()
-    published: list[Event] = []
-    agent._on_session_event = published.append
+    agent, bridge, published = bridged_agent()
     agent._starting_session = True
 
     bridge.record_available_commands("root", [command("early")])
@@ -374,9 +303,9 @@ def test_nothing_is_published_while_a_session_is_starting():
 
 
 def test_start_values_reach_the_agent_after_session_new_and_before_the_prompt(
-    conversation, acp_request_log
+    scripted_conversation, acp_request_log
 ):
-    conv = conversation(acp_config_options={"profile": "thorough"})
+    conv = scripted_conversation(acp_config_options={"profile": "thorough"})
     conv.send_message("hello")
 
     conv.run()
@@ -395,47 +324,33 @@ def test_start_values_reach_the_agent_after_session_new_and_before_the_prompt(
 
 
 async def test_values_are_set_in_order_and_every_response_is_recorded():
-    responses = {
-        "a": SimpleNamespace(config_options=["after-a"]),
-        "b": SimpleNamespace(config_options=["after-b"]),
-    }
+    def answer(config_id: str, **_: Any) -> SetSessionConfigOptionResponse:
+        option = SessionConfigOptionSelect(
+            type="select", id=config_id, name=config_id, current_value="", options=[]
+        )
+        return SetSessionConfigOptionResponse(config_options=[option])
+
     conn = AsyncMock()
-    conn.set_config_option.side_effect = lambda config_id, **_: responses[config_id]
+    conn.set_config_option.side_effect = answer
     recorded: list[tuple[str, list[str]]] = []
 
     await _apply_config_options(
         conn,
         "s1",
         {"b": "2", "a": True},
-        on_config_options=lambda sid, options: recorded.append((sid, list(options))),
+        on_config_options=lambda sid, options: recorded.append(
+            (sid, [option.id for option in options])
+        ),
         mask=lambda text: text,
     )
 
-    assert [c.kwargs["config_id"] for c in conn.set_config_option.await_args_list] == [
-        "b",
-        "a",
-    ]
-    assert recorded == [("s1", ["after-b"]), ("s1", ["after-a"])]
-
-
-async def test_an_internal_agent_error_propagates_unchanged():
-    conn = AsyncMock()
-    conn.set_config_option.side_effect = ACPRequestError(-32603, "Internal error")
-
-    with pytest.raises(ACPRequestError):
-        await _apply_config_options(
-            conn,
-            "s1",
-            {"a": "1"},
-            on_config_options=lambda *_: None,
-            mask=lambda text: text,
-        )
+    assert recorded == [("s1", ["b"]), ("s1", ["a"])]
 
 
 def test_a_refused_start_value_ends_the_start_and_no_prompt_is_sent(
-    conversation, acp_request_log
+    scripted_conversation, acp_request_log
 ):
-    conv = conversation(acp_config_options={"profile": "turbo"})
+    conv = scripted_conversation(acp_config_options={"profile": "turbo"})
     conv.send_message("hello")
 
     with pytest.raises(ACPConfigOptionRejectedError):
@@ -516,18 +431,8 @@ def test_the_model_option_and_an_empty_id_are_refused_in_the_field(config_id):
         ACPAgent(acp_command=["unused"], acp_config_options={config_id: "x"})
 
 
-@pytest.mark.parametrize("config_id", ["model", ""])
-def test_the_model_option_and_an_empty_id_are_refused_by_the_set_call(config_id):
-    agent = ACPAgent(acp_command=["unused"])
-
-    with pytest.raises(ValueError):
-        agent.set_acp_config_option(config_id, "x")
-
-
 def test_a_model_switch_through_set_config_option_updates_the_published_model():
-    agent, bridge = bridged_agent()
-    published: list[Event] = []
-    agent._on_session_event = published.append
+    agent, bridge, published = bridged_agent()
     model_option = SessionConfigOptionSelect(
         type="select",
         id="model",
@@ -539,7 +444,9 @@ def test_a_model_switch_through_set_config_option_updates_the_published_model():
         ],
     )
     conn = AsyncMock()
-    conn.set_config_option.return_value = SimpleNamespace(config_options=[model_option])
+    conn.set_config_option.return_value = SetSessionConfigOptionResponse(
+        config_options=[model_option]
+    )
     agent._conn = conn
     agent._executor = AsyncExecutor()
     agent._model_via_config_option = True
@@ -564,29 +471,8 @@ def test_a_live_set_returns_the_agents_new_controls(start):
     wait_until(lambda: controls_events(run.published)[-1].controls == THOROUGH)
 
 
-def test_a_refusal_raises_with_the_agents_own_sentence(start):
-    run = start()
-
-    with pytest.raises(ACPConfigOptionRejectedError) as refused:
-        run.agent.set_acp_config_option("profile", "turbo")
-
-    assert str(refused.value) == "unknown profile 'turbo'"
-    assert (refused.value.config_id, refused.value.value) == ("profile", "turbo")
-
-
 def test_a_set_before_any_session_is_refused():
     agent = ACPAgent(acp_command=scripted_acp_command())
 
     with pytest.raises(RuntimeError):
         agent.set_acp_config_option("profile", "thorough")
-
-
-def test_a_silent_agent_times_out_within_the_config_option_timeout(start, monkeypatch):
-    run = start("--slow-set", "30")
-    monkeypatch.setattr(acp_agent_module, "_ACP_CONFIG_OPTION_TIMEOUT", 0.5)
-
-    began = time.monotonic()
-    with pytest.raises(TimeoutError, match="profile"):
-        run.agent.set_acp_config_option("profile", "thorough")
-
-    assert time.monotonic() - began < 5

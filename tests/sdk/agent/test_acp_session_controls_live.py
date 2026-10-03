@@ -23,10 +23,8 @@ import contextlib
 import json
 import os
 import shlex
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -41,6 +39,7 @@ from openhands.sdk.conversation.exceptions import ConversationRunError
 from openhands.sdk.event import ACPSessionControlsEvent, MessageEvent
 from openhands.sdk.settings.acp_providers import ACP_PROVIDERS
 from openhands.sdk.workspace import LocalWorkspace
+from tests.conftest import controls_events, wait_until
 from tests.sdk.agent.test_acp_conformance import (
     _isolate_env,
     _skip_if_node_below_floor,
@@ -64,26 +63,15 @@ requires_live_agent = pytest.mark.skipif(
 )
 
 
-def wait_until(condition: Callable[[], Any], timeout: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.05)
-
-
-def controls_events(conv: LocalConversation) -> list[ACPSessionControlsEvent]:
-    return [e for e in conv.state.events if isinstance(e, ACPSessionControlsEvent)]
-
-
 def settled_controls(conv: LocalConversation) -> ACPSessionControls:
     """The session's controls once the newest one is persisted."""
     agent = conv.agent
     assert isinstance(agent, ACPAgent)
     current = agent.wait_for_available_commands(PREVIEW_COMMANDS_WAIT_SECONDS)
     wait_until(
-        lambda: bool(controls_events(conv))
-        and controls_events(conv)[-1].controls == agent.session_controls
+        lambda: bool(controls_events(conv.state.events))
+        and controls_events(conv.state.events)[-1].controls == agent.session_controls,
+        timeout=30,
     )
     return current
 
