@@ -347,8 +347,7 @@ def resolve_entrypoint(manifest: CanvasExtensionManifest, package_root: Path) ->
 def resolve_package_file(package_root: Path, relative: str, what: str) -> Path:
     """Resolve ``relative`` inside ``package_root`` to a contained regular file.
 
-    The filesystem-level check behind :func:`resolve_entrypoint`, shared with
-    panel icons: symlinks are resolved before containment is checked.
+    Symlinks are resolved before containment is checked.
 
     Raises:
         ValueError: It escapes the package or is not a regular file.
