@@ -186,6 +186,7 @@ _ACP_AUTH_TIMEOUT: float = float(os.environ.get("ACP_AUTH_TIMEOUT", "30.0"))
 _ACP_CONFIG_OPTION_TIMEOUT: float = float(
     os.environ.get("ACP_CONFIG_OPTION_TIMEOUT", "30.0")
 )
+_ACP_SESSION_CLOSE_TIMEOUT: float = 2.0
 _ACP_NPX_CACHE_WARM_TIMEOUT: float = float(
     os.environ.get("ACP_NPX_CACHE_WARM_TIMEOUT", "300")
 )
@@ -1430,6 +1431,7 @@ class _OpenHandsACPBridge:
         # is replaced on every change and never mutated, so a reader on another
         # thread can keep the one it got. Written only on the portal thread.
         self._session_controls: dict[str, ACPSessionControls] = {}
+        self._commands_reported: dict[str, threading.Event] = {}
         # Called after every recorded change.
         self.on_session_controls_changed: Callable[[], None] | None = None
 
@@ -1530,6 +1532,7 @@ class _OpenHandsACPBridge:
         """Mask, normalize and store a session's commands; then notify."""
         parsed = ACPSessionControls.parse_commands(commands)
         self._store_session_controls(session_id, "available_commands", parsed)
+        self._commands_reported.setdefault(session_id, threading.Event()).set()
         self._notify_session_controls_changed()
 
     def record_config_options(self, session_id: str, options: Sequence[Any]) -> None:
@@ -1552,6 +1555,11 @@ class _OpenHandsACPBridge:
     def session_controls(self, session_id: str) -> ACPSessionControls:
         """The session's latest snapshot; empty if it has reported nothing."""
         return self._session_controls.get(session_id) or ACPSessionControls()
+
+    def wait_for_available_commands(self, session_id: str, timeout: float) -> bool:
+        """Block until the session has reported commands once, or the timeout."""
+        reported = self._commands_reported.setdefault(session_id, threading.Event())
+        return reported.wait(timeout)
 
     def _record_session_controls(self, session_id: str, update: Any) -> bool:
         """Record an AvailableCommandsUpdate or ConfigOptionUpdate; else False."""
@@ -2156,6 +2164,7 @@ class ACPAgent(AgentBase):
     _on_session_event: Callable[[Event], None] | None = PrivateAttr(default=None)
     _session_controls_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _published_session_controls: ACPSessionControls | None = PrivateAttr(default=None)
+    _supports_session_close: bool = PrivateAttr(default=False)
     _starting_session: bool = PrivateAttr(default=False)
 
     # -- Helpers -----------------------------------------------------------
@@ -3288,6 +3297,14 @@ class ACPAgent(AgentBase):
                 agent_version,
             )
             _log_acp_provider_version(agent_name, agent_version)
+            capabilities = init_response.agent_capabilities
+            session_capabilities = (
+                capabilities.session_capabilities if capabilities is not None else None
+            )
+            self._supports_session_close = (
+                session_capabilities is not None
+                and session_capabilities.close is not None
+            )
 
             # Translate any configured MCP servers into ACP protocol objects,
             # gating remote (http/sse) transports on what this server advertised
@@ -4794,6 +4811,25 @@ class ACPAgent(AgentBase):
                 f"{config_id!r} within {timeout:g}s"
             ) from None
         return self.session_controls
+
+    def wait_for_available_commands(self, timeout: float) -> ACPSessionControls:
+        """Wait until the root session has reported commands once, or the timeout."""
+        if self._client is not None and self._session_id is not None:
+            self._client.wait_for_available_commands(self._session_id, timeout)
+        return self.session_controls
+
+    def close_acp_session(self, timeout: float = _ACP_SESSION_CLOSE_TIMEOUT) -> None:
+        """Send session/close if the server advertised it; log and ignore errors."""
+        if not (self._supports_session_close and self.has_live_acp_session):
+            return
+        assert self._conn is not None
+        assert self._session_id is not None
+        try:
+            self._executor.run_async(
+                self._conn.close_session(session_id=self._session_id), timeout=timeout
+            )
+        except Exception as e:
+            logger.debug("ACP session/close failed: %s", e)
 
     def _bind_session_controls(self) -> None:
         """Point the bridge's change callback at this agent's publisher."""
