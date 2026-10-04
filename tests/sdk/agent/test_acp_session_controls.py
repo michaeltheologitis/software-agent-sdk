@@ -224,6 +224,7 @@ async def test_session_updates_of_both_kinds_are_recorded_and_not_routed_on():
         ACPAvailableCommand(name="go", description="Go")
     ]
     bridge.on_event.assert_not_called()
+    assert bridge.wait_for_available_commands("root", timeout=0)
 
 
 def test_agent_supplied_text_is_masked_before_it_is_stored():
