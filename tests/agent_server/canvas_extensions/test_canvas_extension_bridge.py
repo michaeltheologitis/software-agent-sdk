@@ -479,3 +479,36 @@ async def test_backend_switch_invalidates_existing_session(live_bridge) -> None:
     live_bridge.manager.endpoint = ("127.0.0.1", _free_port())
     switched = await client.get(f"{root}/prefix/static/app.js")
     assert switched.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_http_and_websocket_reach_a_loopback_backend_with_a_proxy_configured(
+    tmp_path: Path, dead_http_proxy: str
+) -> None:
+    async with _live_bridge(tmp_path) as bridge:
+        root = f"{bridge.public_url}/app-backends/{APP_NAME}"
+        # The test's own client goes direct; only the bridge faces the proxy.
+        async with httpx.AsyncClient(verify=False, trust_env=False) as client:
+            bootstrap = await client.post(
+                f"{root}/session", headers=_bootstrap_headers()
+            )
+            assert bootstrap.status_code == 200
+            asset = await client.get(f"{root}/prefix/static/app.js")
+            assert asset.status_code == 200
+            assert asset.json() == {"asset": "ok"}
+            cookie = client.cookies.get(APP_BACKEND_SESSION_COOKIE_NAME)
+
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        async with websockets.connect(
+            root.replace("https://", "wss://") + "/socket",
+            origin=bridge.public_url,
+            additional_headers={
+                "Cookie": f"{APP_BACKEND_SESSION_COOKIE_NAME}={cookie}"
+            },
+            ssl=ssl_context,
+            proxy=None,
+        ) as websocket:
+            await websocket.send("hello")
+            assert await websocket.recv() == "echo:hello"
