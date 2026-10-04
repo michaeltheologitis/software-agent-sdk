@@ -473,11 +473,10 @@ async def test_child_events_without_an_emitter_are_dropped_with_a_debug_line(
 
 
 async def test_replay_is_neither_stored_nor_grants_cancel(wire):
-    wire.sessions.replaying = True
-    await wire.send(ROOT, announce("child-a"))
-    await wire.send("child-a", said("old words"), tool_call("c1"))
-    await wire.send(ROOT, message("task", ROOT, "child-a", "Go."))
-    wire.sessions.replaying = False
+    with wire.bridge.replaying(ROOT):
+        await wire.send(ROOT, announce("child-a"))
+        await wire.send("child-a", said("old words"), tool_call("c1"))
+        await wire.send(ROOT, message("task", ROOT, "child-a", "Go."))
 
     assert wire.emitted == []
     assert wire.bridge.accumulated_text == []
@@ -488,10 +487,9 @@ async def test_replay_is_neither_stored_nor_grants_cancel(wire):
 
 async def test_replayed_child_calls_are_never_tracked_nor_failed_later(wire):
     agent = wire.agent()
-    wire.sessions.replaying = True
-    await wire.send(ROOT, announce("child-a"))
-    await wire.send("child-a", tool_call("c1"))
-    wire.sessions.replaying = False
+    with wire.bridge.replaying(ROOT):
+        await wire.send(ROOT, announce("child-a"))
+        await wire.send("child-a", tool_call("c1"))
 
     wire.bridge.reset()
     agent._cancel_inflight_tool_calls()

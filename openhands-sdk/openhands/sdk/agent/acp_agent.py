@@ -59,7 +59,6 @@ from acp.schema import (
     HttpMcpServer,
     ImageContentBlock,
     KillTerminalResponse,
-    LoadSessionResponse,
     McpServerStdio,
     PermissionOption,
     PromptResponse,
@@ -1648,6 +1647,22 @@ class _OpenHandsACPBridge:
         """Submit every open child segment; runs on the ACP loop after a prompt."""
         if self.subagents is not None:
             self.emit_subagent_events(self.subagents.flush_all())
+
+    @contextlib.contextmanager
+    def replaying(self, root_session_id: str) -> Generator[None]:
+        """Around ``session/load`` of ``root_session_id``: the history it replays
+        is neither stored again nor lets an old ``cancel`` grant authorize
+        anything."""
+        subagents = self.subagents
+        if subagents is None:
+            yield
+            return
+        subagents.root_session_id = root_session_id
+        subagents.replaying = True
+        try:
+            yield
+        finally:
+            subagents.replaying = False
 
     def _child_session(self, session_id: str) -> str | None:
         """``session_id`` when it is an announced child, else None.
@@ -3587,9 +3602,12 @@ class ACPAgent(AgentBase):
             available_models: list[ACPModelInfo] | None = None
             if prior_session_id is not None:
                 try:
-                    load_response = await self._load_session(
-                        conn, client, prior_session_id, working_dir, acp_mcp_servers
-                    )
+                    with client.replaying(prior_session_id):
+                        load_response = await conn.load_session(
+                            cwd=working_dir,
+                            session_id=prior_session_id,
+                            mcp_servers=acp_mcp_servers,
+                        )
                     session_id = prior_session_id
                     # load_session often omits the model block; fall back to the
                     # mechanism detected at session creation (persisted alongside
@@ -5054,30 +5072,6 @@ class ACPAgent(AgentBase):
         assert self._conn is not None
         self._client.subagents.check_cancel(session_id)
         await self._conn.cancel(session_id=session_id)
-
-    async def _load_session(
-        self,
-        conn: ClientSideConnection,
-        client: _OpenHandsACPBridge,
-        session_id: str,
-        working_dir: str,
-        mcp_servers: list[_ACPMcpServer],
-    ) -> LoadSessionResponse:
-        """``session/load``; the history it replays is neither stored again nor
-        lets an old ``cancel`` grant authorize anything."""
-        subagents = client.subagents
-        if subagents is None:
-            return await conn.load_session(
-                cwd=working_dir, session_id=session_id, mcp_servers=mcp_servers
-            )
-        subagents.root_session_id = session_id
-        subagents.replaying = True
-        try:
-            return await conn.load_session(
-                cwd=working_dir, session_id=session_id, mcp_servers=mcp_servers
-            )
-        finally:
-            subagents.replaying = False
 
     def close_acp_session(self, timeout: float = _ACP_SESSION_CLOSE_TIMEOUT) -> None:
         """Send session/close if the server advertised it; log and ignore errors."""
