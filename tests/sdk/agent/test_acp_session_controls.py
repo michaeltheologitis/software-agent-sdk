@@ -1,4 +1,4 @@
-"""ACP session controls: recording and publishing.
+"""ACP session controls: recording, publishing and setting config options.
 
 The outside world here is the ACP agent process, so most tests run a real
 one: the scripted test agent in ``tests/fixtures/acp/scripted_agent.py``. It
@@ -26,23 +26,39 @@ from acp.schema import (
     SessionConfigSelectOption,
     SetSessionConfigOptionResponse,
 )
+from pydantic import ValidationError
 
-from openhands.sdk.agent.acp_agent import ACPAgent, _OpenHandsACPBridge
+from openhands.sdk.agent.acp_agent import (
+    ACPAgent,
+    ACPConfigOptionRejectedError,
+    _apply_config_options,
+    _OpenHandsACPBridge,
+)
 from openhands.sdk.agent.acp_models import (
     ACPAvailableCommand,
+    ACPCommandInput,
     ACPConfigOption,
     ACPConfigOptionValue,
     ACPSessionControls,
 )
 from openhands.sdk.conversation.secret_registry import SecretRegistry
-from openhands.sdk.conversation.state import ConversationState
+from openhands.sdk.conversation.state import (
+    ConversationExecutionStatus,
+    ConversationState,
+)
 from openhands.sdk.event import ACPSessionControlsEvent, Event
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.utils.async_executor import AsyncExecutor
 from openhands.sdk.workspace import LocalWorkspace
 from tests.conftest import controls_events, scripted_acp_command, wait_until
 
 
 SUMMARIZE = ACPAvailableCommand(name="summarize", description="Summarize the input")
+COMPARE = ACPAvailableCommand(
+    name="compare",
+    description="Compare two things",
+    input=ACPCommandInput(hint="what to compare"),
+)
 
 
 def profile_option(current: str, *values: str) -> ACPConfigOption:
@@ -59,10 +75,18 @@ FAST = ACPSessionControls(
     available_commands=[SUMMARIZE],
     config_options=[profile_option("fast", "fast", "thorough")],
 )
+THOROUGH = ACPSessionControls(
+    available_commands=[SUMMARIZE, COMPARE],
+    config_options=[profile_option("thorough", "fast", "thorough")],
+)
 
 
 def command(name: str, description: str = "") -> AvailableCommand:
     return AvailableCommand(name=name, description=description)
+
+
+def methods(log: list[dict[str, Any]]) -> list[str]:
+    return [entry["method"] for entry in log]
 
 
 class Started(NamedTuple):
@@ -116,6 +140,15 @@ def bridged_agent() -> tuple[ACPAgent, _OpenHandsACPBridge, list[Event]]:
 
 
 # -- Recording and publishing -------------------------------------------------
+
+
+def test_controls_reported_while_the_session_starts_are_published_once_it_started(
+    start,
+):
+    run = start(acp_config_options={"profile": "thorough"})
+
+    assert [e.controls for e in controls_events(run.published)] == [THOROUGH]
+    assert run.agent.session_controls == THOROUGH
 
 
 def test_commands_reported_after_session_new_answered_are_published(start):
@@ -265,7 +298,146 @@ def test_nothing_is_published_while_a_session_is_starting():
     assert published == []
 
 
+# -- Option values at the start ------------------------------------------------
+
+
+def test_start_values_reach_the_agent_after_session_new_and_before_the_prompt(
+    scripted_conversation, acp_request_log
+):
+    conv = scripted_conversation(acp_config_options={"profile": "thorough"})
+    conv.send_message("hello")
+
+    conv.run()
+
+    calls = methods(acp_request_log())
+    assert calls.index("session/new") < calls.index("session/set_config_option")
+    assert calls.index("session/set_config_option") < calls.index("session/prompt")
+    set_params = acp_request_log()[calls.index("session/set_config_option")]["params"]
+    assert (set_params["configId"], set_params["value"]) == ("profile", "thorough")
+    wait_until(
+        lambda: (
+            controls_events(conv.state.events)[-1].config_options[0].current_value
+            == "thorough"
+        )
+    )
+
+
+async def test_values_are_set_in_order_and_every_response_is_recorded():
+    def answer(config_id: str, **_: Any) -> SetSessionConfigOptionResponse:
+        option = SessionConfigOptionSelect(
+            type="select", id=config_id, name=config_id, current_value="", options=[]
+        )
+        return SetSessionConfigOptionResponse(config_options=[option])
+
+    conn = AsyncMock()
+    conn.set_config_option.side_effect = answer
+    recorded: list[tuple[str, list[str]]] = []
+
+    await _apply_config_options(
+        conn,
+        "s1",
+        {"b": "2", "a": True},
+        on_config_options=lambda sid, options: recorded.append(
+            (sid, [option.id for option in options])
+        ),
+        mask=lambda text: text,
+    )
+
+    assert recorded == [("s1", ["b"]), ("s1", ["a"])]
+
+
+def test_a_refused_start_value_ends_the_start_and_no_prompt_is_sent(
+    scripted_conversation, acp_request_log
+):
+    conv = scripted_conversation(acp_config_options={"profile": "turbo"})
+    conv.send_message("hello")
+
+    with pytest.raises(ACPConfigOptionRejectedError):
+        conv.run()
+
+    errors = [e for e in conv.state.events if isinstance(e, ConversationErrorEvent)]
+    assert [(e.code, e.detail) for e in errors] == [
+        ("ACPConfigOptionRejected", "unknown profile 'turbo'")
+    ]
+    assert conv.state.execution_status == ConversationExecutionStatus.ERROR
+    assert "session/prompt" not in methods(acp_request_log())
+
+
+def test_after_a_successful_load_no_value_is_reapplied(
+    start, acp_request_log, tmp_path
+):
+    sessions = str(tmp_path / "sessions.json")
+    conversation_id = uuid.uuid4()
+    persistence_dir = tmp_path / "persisted"
+    first = start(
+        "--sessions-file",
+        sessions,
+        conversation_id=conversation_id,
+        persistence_dir=persistence_dir,
+        acp_config_options={"profile": "thorough"},
+    )
+    first.agent.close()
+    before_resume = len(acp_request_log())
+
+    resumed = start(
+        "--sessions-file",
+        sessions,
+        conversation_id=conversation_id,
+        persistence_dir=persistence_dir,
+        acp_config_options={"profile": "thorough"},
+    )
+
+    resumed_calls = methods(acp_request_log()[before_resume:])
+    assert "session/load" in resumed_calls
+    assert "session/new" not in resumed_calls
+    assert "session/set_config_option" not in resumed_calls
+    assert resumed.agent._session_id == first.agent._session_id
+    wait_until(lambda: resumed.agent.session_controls == THOROUGH)
+
+
+def test_after_a_fallback_to_a_fresh_session_every_value_is_reapplied(
+    start, acp_request_log, tmp_path
+):
+    conversation_id = uuid.uuid4()
+    persistence_dir = tmp_path / "persisted"
+    first = start(
+        conversation_id=conversation_id,
+        persistence_dir=persistence_dir,
+        acp_config_options={"profile": "thorough"},
+    )
+    first.agent.close()
+    before_resume = len(acp_request_log())
+
+    # A new process does not know the old session, so session/load fails.
+    resumed = start(
+        conversation_id=conversation_id,
+        persistence_dir=persistence_dir,
+        acp_config_options={"profile": "thorough"},
+    )
+
+    resumed_calls = methods(acp_request_log()[before_resume:])
+    assert resumed_calls.index("session/load") < resumed_calls.index("session/new")
+    assert "session/set_config_option" in resumed_calls
+    assert resumed.agent.session_controls == THOROUGH
+
+
 # -- The model option ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "config_id, sentence",
+    [
+        ("model", "The 'model' option is set with switch_acp_model"),
+        ("", "config_id must be a non-empty string"),
+    ],
+)
+def test_the_model_option_and_an_empty_id_are_refused_in_the_field_and_by_a_live_set(
+    start, config_id, sentence
+):
+    with pytest.raises(ValidationError, match=sentence):
+        ACPAgent(acp_command=["unused"], acp_config_options={config_id: "x"})
+    with pytest.raises(ValueError, match=sentence):
+        start().agent.set_acp_config_option(config_id, "x")
 
 
 def test_a_model_switch_through_set_config_option_updates_the_published_model():
@@ -294,3 +466,22 @@ def test_a_model_switch_through_set_config_option_updates_the_published_model():
 
     model = controls_events(published)[-1].config_options[0]
     assert (model.id, model.current_value) == ("model", "m2")
+
+
+# -- Setting an option live -----------------------------------------------------
+
+
+def test_a_live_set_returns_the_agents_new_controls(start):
+    run = start()
+
+    controls = run.agent.set_acp_config_option("profile", "thorough")
+
+    assert controls == THOROUGH
+    wait_until(lambda: controls_events(run.published)[-1].controls == THOROUGH)
+
+
+def test_a_set_before_any_session_is_refused():
+    agent = ACPAgent(acp_command=scripted_acp_command())
+
+    with pytest.raises(RuntimeError):
+        agent.set_acp_config_option("profile", "thorough")

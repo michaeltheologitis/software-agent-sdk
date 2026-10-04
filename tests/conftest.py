@@ -1,5 +1,6 @@
 """Common test fixtures and utilities."""
 
+import json
 import sys
 import time
 import uuid
@@ -72,6 +73,26 @@ def examples_results_dir(pytestconfig: pytest.Config) -> Path:
         for existing in result_dir.glob("*.json"):
             existing.unlink()
     return result_dir
+
+
+@pytest.fixture
+def acp_request_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[], list[dict[str, Any]]]:
+    """Record what reaches the scripted ACP agent; return the log's reader.
+
+    Each entry is one request or notification, ``{"method", "params"}``, in
+    arrival order, across every agent process the test starts.
+    """
+    log_path = tmp_path / "acp-requests.jsonl"
+    monkeypatch.setenv("SCRIPTED_ACP_LOG", str(log_path))
+
+    def read() -> list[dict[str, Any]]:
+        if not log_path.exists():
+            return []
+        return [json.loads(line) for line in log_path.read_text().splitlines()]
+
+    return read
 
 
 @pytest.fixture
