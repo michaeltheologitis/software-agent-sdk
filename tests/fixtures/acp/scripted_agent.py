@@ -247,6 +247,34 @@ class ScriptedAgent:
             self._sessions_file.write_text(json.dumps(self._sessions))
 
 
+# -- Wire updates, as an ACP agent sends them ----------------------------------
+
+
+def text(value: str) -> dict[str, Any]:
+    return {"type": "text", "text": value}
+
+
+def subagent(child: str, **fields: Any) -> dict[str, Any]:
+    return {"sessionUpdate": "subagent_update", "sessionId": child, **fields}
+
+
+def said(value: str) -> dict[str, Any]:
+    return {"sessionUpdate": "agent_message_chunk", "content": text(value)}
+
+
+def message(
+    message_id: str, sender: str, recipient: str, value: str, **fields: Any
+) -> dict[str, Any]:
+    return {
+        "sessionUpdate": "session_message",
+        "messageId": message_id,
+        "senderSessionId": sender,
+        "recipientSessionId": recipient,
+        "content": [text(value)],
+        **fields,
+    }
+
+
 def _log_request(method: str, params: JsonValue | None) -> None:
     log_path = os.environ.get(LOG_ENV_VAR)
     if not log_path:
