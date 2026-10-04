@@ -1832,8 +1832,8 @@ class LocalConversation(BaseConversation):
     def cancel_acp_session(self, session_id: str) -> None:
         """Cancel one ACP sub-agent session's current work.
 
-        Unlike ``switch_acp_model`` this takes no state lock: it must work while
-        a synchronous ``run()`` holds the lock for the whole turn.
+        Takes no state lock, so it works while ``run()`` holds the lock for a
+        whole turn.
 
         Raises:
             ValueError: the conversation's agent is not an ``ACPAgent``.

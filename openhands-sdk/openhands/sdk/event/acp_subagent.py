@@ -2,8 +2,8 @@
 
 ACP schema 1.24.1 (unstable) lets an agent expose sub-agent sessions: a child
 session announced with ``subagent_update``, messages between sessions, and the
-child's own text. Each kind here is stored only for agents with
-``ACPAgent.acp_subagents``.
+child's own text. Each kind here is stored only with sub-agent sessions
+opted into.
 """
 
 from __future__ import annotations

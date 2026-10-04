@@ -206,8 +206,8 @@ class ACPSubagentSessions:
         return [self._snapshot(session_id)]
 
     def before_update(self, session_id: str) -> list[Event]:
-        """Flush ``session_id``'s open segment; called before any update for it
-        that is not a text chunk, a message chunk or a usage update."""
+        """Flush ``session_id``'s open segment, which any update other than
+        text, a message chunk or usage ends."""
         return [] if self.replaying else self._flush(session_id)
 
     def flush_all(self) -> list[Event]:

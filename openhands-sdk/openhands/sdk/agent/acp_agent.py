@@ -1447,14 +1447,13 @@ class _OpenHandsACPBridge:
         self._commands_reported: dict[str, threading.Event] = {}
         # Called after every recorded change.
         self.on_session_controls_changed: Callable[[], None] | None = None
-        # Sub-agent sessions (ACPAgent.acp_subagents); None routes as before.
+        # None without sub-agent sessions: every update takes the root's path.
         self.subagents: ACPSubagentSessions | None = (
             ACPSubagentSessions(mask=self._mask_value) if subagents else None
         )
         # (session, routing) pairs already warned about as never announced.
         self._warned_unannounced: set[tuple[str, str]] = set()
-        # The conversation's emitter (ACPAgent._on_session_event), set per
-        # connection; every child event goes through it.
+        # Receives every sub-agent event, in order; unset, they are dropped.
         self.on_session_event: Callable[[Event], None] | None = None
 
     def reset(self) -> None:
@@ -1537,7 +1536,7 @@ class _OpenHandsACPBridge:
             return value
 
     def _mask_tool_call_entry(self, entry: dict[str, Any]) -> None:
-        """Mask title / raw_input / raw_output / content of a tool-call entry.
+        """Mask title / raw_input / raw_output / content / meta of a tool-call entry.
 
         Applied in place at ingestion (``session_update``) so the accumulator
         itself never holds plaintext secrets, and every downstream emitter
@@ -1605,7 +1604,7 @@ class _OpenHandsACPBridge:
         session_id: str,
         update: SubagentUpdate | SessionMessage | SessionMessageChunk,
     ) -> None:
-        """The shim's callback: route one unstable update; never awaits."""
+        """Route one unstable sub-agent update; never awaits, so it keeps wire order."""
         self._last_activity_monotonic = time.monotonic()
         subagents = self.subagents
         if subagents is None or session_id == self._fork_session_id:
@@ -1878,7 +1877,7 @@ class _OpenHandsACPBridge:
         and update as the subprocess runs.  The same ``tool_call_id`` is
         reused on every emission — consumers should dedupe by id and treat
         the last-seen event as authoritative. A sub-agent session's call goes
-        to the conversation's emitter instead of the turn's ``on_event``.
+        to ``on_session_event`` instead of the turn's ``on_event``.
         """
         child = tc.get("acp_session_id")
         if child is None and self.on_event is None:
@@ -3809,8 +3808,9 @@ class ACPAgent(AgentBase):
 
         Captures the bridge's ``on_event`` callback, then unwires the bridge
         before emitting synthetic terminal events so trailing updates from the
-        abandoned portal prompt cannot land after these failures.  No-op if
-        ``on_event`` was never set (e.g. tests exercising the bridge alone).
+        abandoned portal prompt cannot land after these failures.  Root calls
+        are skipped if ``on_event`` was never set (e.g. tests exercising the
+        bridge alone); a sub-agent's calls go to ``on_session_event``.
         """
         on_event = self._client.on_event
         self._clear_turn_callbacks()
@@ -3837,11 +3837,9 @@ class ACPAgent(AgentBase):
                     meta=tc.get("meta"),
                 )
                 if child is not None:
-                    # The emitter's FIFO keeps it after the call's own
-                    # ``started`` event, which went the same way. The entry
-                    # stays open, across turns, for the agent's own report,
-                    # which lands after this one and so wins; later aborts
-                    # skip it.
+                    # Sent the way the call's ``started`` event went, so it is
+                    # stored after it. The entry stays open for the agent's
+                    # own report, which then wins; later aborts skip it.
                     self._client.emit_subagent_events([failure])
                     tc["failed_by_abort"] = True
                 elif on_event is not None:

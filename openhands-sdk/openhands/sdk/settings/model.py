@@ -1748,9 +1748,6 @@ class ACPAgentSettings(AgentSettingsBase):
             "conversations share one sandbox (see #1019)."
         ),
     )
-    # Programmatic / downstream-facing knob, like acp_isolate_data_dir: the
-    # deploying application turns it on for an agent it knows implements ACP's
-    # sub-agent sessions.
     acp_subagents: bool = Field(
         default=False,
         description=(
