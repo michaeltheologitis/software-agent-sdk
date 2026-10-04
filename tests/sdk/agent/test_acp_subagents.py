@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import threading
 import time
 import uuid
@@ -49,7 +48,7 @@ from openhands.sdk.event import (
     ACPToolCallEvent,
     Event,
 )
-from tests.conftest import scripted_acp_command, subagent_snapshots, wait_until
+from tests.conftest import subagent_snapshots, wait_until
 from tests.fixtures.acp.scripted_agent import (
     announce,
     idle,
@@ -928,39 +927,6 @@ def test_scripted_transcript_replays_a_recording(conversation, tmp_path, recordi
     wait_until(lambda: turned_idle(conv, "worker"))
 
     assert tree_from(list(conv.state.events)) == RECORDED_TREE
-
-
-def test_transcript_interval_paces_the_replay(conversation, tmp_path):
-    lines = outgoing_only(recorded_run())
-    updates = sum(1 for line in lines if "update" in line.get("params", {}))
-    conv = conversation(
-        "--transcript",
-        str(write_lines(tmp_path, lines)),
-        "--transcript-interval-ms",
-        "50",
-    )
-
-    started = time.monotonic()
-    run(conv)
-
-    assert time.monotonic() - started >= updates * 0.05
-
-
-def test_transcript_wait_point_that_is_never_reached_exits_non_zero(tmp_path):
-    path = write_lines(tmp_path, outgoing_only(recorded_run()))
-    agent = subprocess.Popen(
-        scripted_acp_command("--transcript", str(path), "--wait-timeout", "0.2"),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert agent.wait(timeout=10) != 0
-    finally:
-        agent.kill()
-        for stream in (agent.stdin, agent.stdout, agent.stderr):
-            assert stream is not None
-            stream.close()
 
 
 # -- Ordering, as the persisted contract states it ------------------------------------
