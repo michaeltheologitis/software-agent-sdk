@@ -595,6 +595,57 @@ def test_acp_resolves_to_settings_without_credentials(
     assert isinstance(settings.create_agent(), ACPAgent)
 
 
+@pytest.mark.parametrize("opted_in", [False, True])
+def test_acp_profile_carries_the_subagents_opt_in_to_the_agent(
+    llm_store: LLMProfileStore, opted_in: bool
+) -> None:
+    profile = ACPAgentProfile(
+        name="acp", acp_server="custom", acp_command="my-acp", acp_subagents=opted_in
+    )
+
+    settings = resolve_agent_profile(
+        profile,
+        llm_store=llm_store,
+        mcp_config={},
+        available_skills=None,
+        cipher=None,
+    )
+
+    assert isinstance(settings, ACPAgentSettings)
+    assert settings.acp_subagents is opted_in
+    assert settings.create_agent().acp_subagents is opted_in
+
+
+def test_acp_seeded_profile_keeps_the_subagents_opt_in(
+    llm_store: LLMProfileStore,
+) -> None:
+    from openhands.sdk.profiles import build_seed_profile
+    from openhands.sdk.settings.model import validate_agent_settings
+
+    settings = validate_agent_settings(
+        {
+            "agent_kind": "acp",
+            "acp_server": "custom",
+            "acp_command": ["my-acp"],
+            "acp_subagents": True,
+        }
+    )
+
+    profile = build_seed_profile(settings, active_llm_profile=None)
+    resolved = resolve_agent_profile(
+        profile,
+        llm_store=llm_store,
+        mcp_config={},
+        available_skills=None,
+        cipher=None,
+    )
+
+    assert isinstance(profile, ACPAgentProfile)
+    assert profile.acp_subagents is True
+    assert isinstance(resolved, ACPAgentSettings)
+    assert resolved.acp_subagents is True
+
+
 def test_acp_blank_command_resolves_empty_list(
     llm_store: LLMProfileStore,
 ) -> None:
