@@ -19,6 +19,11 @@ Flags:
   internal error (-32603) whose message is ``SENTENCE``.
 - ``--auth-required``: answer ``session/new`` with ACP's authentication
   required error (-32000).
+- ``--subagents``: play a sub-agent run (ACP schema 1.24.1's unstable sub-agent
+  sessions) on each prompt, before the reply. Its children are ``child-a``
+  (with a grandchild, ``child-a-1``), ``child-c`` (which cannot be cancelled)
+  and ``child-b``; only the root's lines are played when the client did not
+  advertise ``clientCapabilities.subagents``.
 
 When the ``SCRIPTED_ACP_LOG`` environment variable names a file, every request
 and notification the agent receives is appended to it as one JSON line,
@@ -54,6 +59,7 @@ from acp.schema import (
     AvailableCommandsUpdate,
     CloseSessionResponse,
     ConfigOptionUpdate,
+    Cost,
     Implementation,
     InitializeResponse,
     LoadSessionResponse,
@@ -80,6 +86,15 @@ PROFILES = ("fast", "thorough")
 COMMANDS_AFTER_NEW_SESSION_DELAY = 0.05
 CONTEXT_WINDOW = 1000
 LOG_ENV_VAR = "SCRIPTED_ACP_LOG"
+SESSION_UPDATE = CLIENT_METHODS["session_update"]
+
+ROOT_CELL = "cell-1"
+CHILD_A = "child-a"
+GRANDCHILD = "child-a-1"
+CHILD_B = "child-b"
+CHILD_C = "child-c"
+CHILD_COST = 0.0004
+ROOT_COST = 0.0011
 
 SUMMARIZE = AvailableCommand(name="summarize", description="Summarize the input")
 COMPARE = AvailableCommand(
@@ -173,12 +188,23 @@ class ScriptedAgent:
                     config_options=[self._option(session_id)],
                 ),
             )
+        if self._args.subagents:
+            assert self.conn is not None
+            await play_subagent_run(
+                self.conn,
+                session_id,
+                advertised=advertises_subagents(self.initialize_params),
+            )
         first_text = next((b.text for b in prompt if b.type == "text"), "")
         await self._update(session_id, update_agent_message_text(first_text))
+        cost = Cost(amount=ROOT_COST, currency="USD") if self._args.subagents else None
         await self._update(
             session_id,
             UsageUpdate(
-                session_update="usage_update", used=len(first_text), size=CONTEXT_WINDOW
+                session_update="usage_update",
+                used=len(first_text),
+                size=CONTEXT_WINDOW,
+                cost=cost,
             ),
         )
         return PromptResponse(stop_reason="end_turn")
@@ -247,6 +273,11 @@ class ScriptedAgent:
             self._sessions_file.write_text(json.dumps(self._sessions))
 
 
+def advertises_subagents(initialize_params: dict[str, Any]) -> bool:
+    """Whether the client's raw ``initialize`` params advertise ``subagents``."""
+    return "subagents" in (initialize_params.get("clientCapabilities") or {})
+
+
 # -- Wire updates, as an ACP agent sends them ----------------------------------
 
 
@@ -258,8 +289,54 @@ def subagent(child: str, **fields: Any) -> dict[str, Any]:
     return {"sessionUpdate": "subagent_update", "sessionId": child, **fields}
 
 
+def announce(
+    child: str, *, cell: str | None = ROOT_CELL, cancel: bool = True, **fields: Any
+) -> dict[str, Any]:
+    update = subagent(child, state={"state": "running"}, **fields)
+    if cell is not None:
+        update["_meta"] = {"openhands": {"parentToolCallId": cell}}
+    if cancel:
+        update["capabilities"] = {"cancel": {}}
+    return update
+
+
+def idle(child: str, stop_reason: str = "end_turn") -> dict[str, Any]:
+    return subagent(child, state={"state": "idle", "stopReason": stop_reason})
+
+
+def tool_call(call_id: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "sessionUpdate": "tool_call",
+        "toolCallId": call_id,
+        "title": f"Run {call_id}",
+        "kind": "execute",
+        "status": "in_progress",
+        **fields,
+    }
+
+
+def tool_done(call_id: str, status: str = "completed", **fields: Any) -> dict[str, Any]:
+    return {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": call_id,
+        "status": status,
+        **fields,
+    }
+
+
+def thought(value: str) -> dict[str, Any]:
+    return {"sessionUpdate": "agent_thought_chunk", "content": text(value)}
+
+
 def said(value: str) -> dict[str, Any]:
     return {"sessionUpdate": "agent_message_chunk", "content": text(value)}
+
+
+def usage(cost: float | None = None, size: int = CONTEXT_WINDOW) -> dict[str, Any]:
+    update: dict[str, Any] = {"sessionUpdate": "usage_update", "used": 10, "size": size}
+    if cost is not None:
+        update["cost"] = {"amount": cost, "currency": "USD"}
+    return update
 
 
 def message(
@@ -273,6 +350,63 @@ def message(
         "content": [text(value)],
         **fields,
     }
+
+
+def message_chunk(
+    message_id: str, sender: str, recipient: str, value: str
+) -> dict[str, Any]:
+    return {
+        "sessionUpdate": "session_message_chunk",
+        "messageId": message_id,
+        "senderSessionId": sender,
+        "recipientSessionId": recipient,
+        "content": text(value),
+    }
+
+
+async def play_subagent_run(
+    conn: Connection,
+    root_session_id: str,
+    *,
+    advertised: bool,
+) -> None:
+    """Send the generic sub-agent run as raw session/update notifications; only
+    the root's lines when the client did not advertise ``subagents``."""
+
+    async def send(session_id: str, update: dict[str, Any]) -> None:
+        await conn.send_notification(
+            SESSION_UPDATE, {"sessionId": session_id, "update": update}
+        )
+
+    root = root_session_id
+    await send(root, tool_call(ROOT_CELL, title="Run spawn"))
+    if advertised:
+        await send(root, announce(CHILD_A, title="Summarize part A"))
+        await send(root, message("child-a-task", root, CHILD_A, "Summarize part A."))
+        await send(CHILD_A, thought("Reading "))
+        await send(CHILD_A, thought("part A."))
+        await send(CHILD_A, tool_call("cell-a1", title="Run delegate"))
+        await send(CHILD_A, announce(GRANDCHILD, cell="cell-a1", title="Check part A"))
+        for part in ("Part A ", "checks out."):
+            await send(
+                GRANDCHILD, message_chunk("child-a-1-answer", GRANDCHILD, CHILD_A, part)
+            )
+        await send(CHILD_A, idle(GRANDCHILD))
+        await send(CHILD_A, tool_done("cell-a1", rawOutput="checked"))
+        await send(CHILD_A, usage(CHILD_COST))
+        await send(CHILD_A, message("child-a-answer", CHILD_A, root, "Part A: fine."))
+        await send(root, idle(CHILD_A))
+
+        await send(root, announce(CHILD_C, cancel=False, title="Summarize part C"))
+        await send(CHILD_C, tool_call("cell-c1", title="Run count"))
+        await send(CHILD_C, tool_done("cell-c1", rawOutput="3"))
+        await send(root, idle(CHILD_C))
+
+        await send(root, announce(CHILD_B, title="Summarize part B"))
+        await send(CHILD_B, tool_call("cell-b1", title="Run slow"))
+        await send(CHILD_B, tool_done("cell-b1", rawOutput="done"))
+        await send(root, idle(CHILD_B))
+    await send(root, tool_done(ROOT_CELL, rawOutput="spawned"))
 
 
 def _log_request(method: str, params: JsonValue | None) -> None:
@@ -314,7 +448,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sessions-file", type=Path, default=None)
     parser.add_argument("--set-error", default=None)
     parser.add_argument("--auth-required", action="store_true")
+    add_subagent_arguments(parser)
     return parser
+
+
+def add_subagent_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add --subagents."""
+    parser.add_argument("--subagents", action="store_true")
 
 
 async def run(args: argparse.Namespace) -> None:

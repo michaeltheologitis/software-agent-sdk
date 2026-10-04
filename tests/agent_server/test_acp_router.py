@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
+import jsonschema
 import pytest
 from fastapi import APIRouter, FastAPI
 
@@ -26,6 +27,7 @@ from openhands.agent_server.conversation_router import conversation_router
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.event_router import event_router
 from openhands.agent_server.event_service import RunSlot
+from openhands.agent_server.openapi import build_public_openapi
 from openhands.agent_server.persistence import reset_stores
 from openhands.agent_server.persistence.store import get_agent_profile_store
 from openhands.agent_server.server_details_router import build_server_info
@@ -102,6 +104,12 @@ class Server:
             f"/api/conversations/{conversation_id}/acp/config-options",
             json={"config_id": config_id, "value": value},
         )
+
+    async def events(self, conversation_id: UUID) -> list[dict[str, Any]]:
+        response = await self.client.get(
+            f"/api/conversations/{conversation_id}/events/search", params={"limit": 100}
+        )
+        return response.json()["items"]
 
     async def newest_controls(self, conversation_id: UUID) -> dict[str, Any] | None:
         response = await self.client.get(
@@ -491,3 +499,43 @@ async def test_a_set_the_agent_does_not_answer_times_out(server, monkeypatch):
 
 def test_server_info_announces_acp_session_controls():
     assert "acp_session_controls_v1" in build_server_info().capabilities
+
+
+def subagent_agent(*flags: str) -> dict[str, Any]:
+    return scripted_agent("--subagents", *flags, acp_subagents=True)
+
+
+async def stored_snapshot(
+    server: Server, conversation_id: UUID, child: str, state: str
+) -> dict[str, Any]:
+    async with asyncio.timeout(15):
+        while True:
+            snapshots = [
+                e
+                for e in await server.events(conversation_id)
+                if e["kind"] == "ACPSubagentEvent" and e["acp_session_id"] == child
+            ]
+            if snapshots and snapshots[-1].get("state") == state:
+                return snapshots[-1]
+            await asyncio.sleep(0.05)
+
+
+async def test_stored_sub_agent_events_validate_against_the_event_schema(server):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+    await stored_snapshot(server, conversation_id, "child-b", "idle")
+    openapi = build_public_openapi()
+    validator = jsonschema.Draft202012Validator(
+        {"$ref": "#/components/schemas/Event", "components": openapi["components"]}
+    )
+
+    events = await server.events(conversation_id)
+
+    kinds = {event["kind"] for event in events}
+    assert {
+        "ACPSubagentEvent",
+        "ACPSessionMessageEvent",
+        "ACPSessionTextEvent",
+        "ACPToolCallEvent",
+    } <= kinds
+    for event in events:
+        validator.validate(event)
