@@ -1,14 +1,21 @@
 """Common test fixtures and utilities."""
 
+import sys
+import time
 import uuid
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import SecretStr
 
 from openhands.sdk import Agent
+from openhands.sdk.agent.acp_agent import ACPAgent
+from openhands.sdk.conversation import LocalConversation
 from openhands.sdk.conversation.state import ConversationState
+from openhands.sdk.event import ACPSessionControlsEvent, Event
 from openhands.sdk.io import InMemoryFileStore
 from openhands.sdk.llm import LLM
 from openhands.sdk.tool import ToolExecutor
@@ -20,6 +27,12 @@ TOKENIZER_FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "tokenizers"
 QWEN3_TOKENIZER_CONFIG = (
     TOKENIZER_FIXTURES_DIR / "qwen3-4b-instruct-2507-tokenizer_config.json"
 )
+SCRIPTED_ACP_AGENT = REPO_ROOT / "tests" / "fixtures" / "acp" / "scripted_agent.py"
+
+
+def scripted_acp_command(*flags: str) -> list[str]:
+    """The ``acp_command`` that runs the scripted ACP test agent with ``flags``."""
+    return [sys.executable, str(SCRIPTED_ACP_AGENT), *flags]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -59,6 +72,56 @@ def examples_results_dir(pytestconfig: pytest.Config) -> Path:
         for existing in result_dir.glob("*.json"):
             existing.unlink()
     return result_dir
+
+
+@pytest.fixture
+def scripted_conversation(tmp_path: Path) -> Iterator[Callable[..., LocalConversation]]:
+    """Make LocalConversations on the scripted ACP agent; each is closed after.
+
+    ``flags`` go to the agent's command and ``agent_fields`` to its ACPAgent.
+    With ``conversation_id``, the conversation persisted under that id is
+    resumed with the agent it persisted instead.
+    """
+    conversations: list[LocalConversation] = []
+
+    def make(
+        *flags: str, conversation_id: uuid.UUID | None = None, **agent_fields: Any
+    ) -> LocalConversation:
+        agent = (
+            None
+            if conversation_id
+            else ACPAgent(acp_command=scripted_acp_command(*flags), **agent_fields)
+        )
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(exist_ok=True)
+        conv = LocalConversation(
+            agent,
+            workspace=str(workspace),
+            persistence_dir=str(tmp_path / "conversations"),
+            conversation_id=conversation_id,
+            visualizer=None,
+            delete_on_close=False,
+        )
+        conversations.append(conv)
+        return conv
+
+    yield make
+    for conv in conversations:
+        conv.close()
+
+
+def controls_events(events: Iterable[Event]) -> list[ACPSessionControlsEvent]:
+    """The ACPSessionControlsEvents among ``events``, oldest first."""
+    return [e for e in events if isinstance(e, ACPSessionControlsEvent)]
+
+
+def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> None:
+    """Poll ``condition`` until it is truthy; fail after ``timeout`` seconds."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        time.sleep(0.02)
 
 
 @pytest.fixture(scope="session")

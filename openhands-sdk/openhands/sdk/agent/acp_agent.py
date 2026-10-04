@@ -47,6 +47,8 @@ from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
     AllowedOutcome,
+    AvailableCommandsUpdate,
+    ConfigOptionUpdate,
     CreateElicitationResponse,
     CreateTerminalResponse,
     DeclineElicitationResponse,
@@ -74,6 +76,7 @@ from acp.schema import (
 )
 from acp.transports import default_environment
 from pydantic import (
+    BaseModel,
     Field,
     PrivateAttr,
     SecretStr,
@@ -92,7 +95,10 @@ from openhands.sdk.agent.acp_file_credentials import (
     file_credential_looks_usable,
     write_secret_file,
 )
-from openhands.sdk.agent.acp_models import ACPModelInfo
+from openhands.sdk.agent.acp_models import (
+    ACPModelInfo,
+    ACPSessionControls,
+)
 from openhands.sdk.agent.acp_tracing import ACPTurnTrace
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.agent.stream_context import StreamContext
@@ -104,8 +110,10 @@ from openhands.sdk.credential import (
     VersionedCredentialBinding,
 )
 from openhands.sdk.event import (
+    ACPSessionControlsEvent,
     ACPToolCallEvent,
     ActionEvent,
+    Event,
     MessageEvent,
     ObservationEvent,
     SystemPromptEvent,
@@ -589,6 +597,14 @@ def _model_config_options(
     return ((_MODEL_CONFIG_OPTION_ID, model),)
 
 
+def _session_config_options(response: Any) -> list[Any]:
+    """The ``configOptions`` of a session response; empty when absent.
+
+    ``getattr`` keeps it tolerant of partial structures from older agents.
+    """
+    return list(getattr(response, "config_options", None) or [])
+
+
 def _model_config_option(response: Any) -> Any | None:
     """Return the ``model`` ``configOptions`` select off a session response.
 
@@ -604,7 +620,7 @@ def _model_config_option(response: Any) -> Any | None:
     lists the union members directly on 0.10.x; unwrap ``.root`` so detection
     works on either.
     """
-    for raw in getattr(response, "config_options", None) or []:
+    for raw in _session_config_options(response):
         opt = getattr(raw, "root", raw)
         if (
             getattr(opt, "type", None) == "select"
@@ -621,6 +637,7 @@ async def _apply_acp_model(
     *,
     agent_name: str | None = None,
     via_config_option: bool,
+    on_config_options: Callable[[str, Sequence[Any]], None] | None = None,
 ) -> None:
     """Apply ``model`` to a live ACP session via the mechanism the session
     advertised: ``set_config_option(configId="model")`` for configOptions-based
@@ -637,12 +654,16 @@ async def _apply_acp_model(
     only invokes it when the connection actually exposes the method (test
     doubles do; real 0.12 connections do not) and otherwise no-ops rather than
     raising ``AttributeError``.
+
+    ``on_config_options`` records each ``set_config_option`` response's options.
     """
     if via_config_option:
         for config_id, value in _model_config_options(agent_name, model):
-            await conn.set_config_option(
+            response = await conn.set_config_option(
                 config_id=config_id, value=value, session_id=session_id
             )
+            if on_config_options is not None:
+                on_config_options(session_id, _session_config_options(response))
     elif hasattr(conn, "set_session_model"):
         await conn.set_session_model(  # type: ignore[attr-defined]
             model_id=model, session_id=session_id
@@ -827,6 +848,7 @@ async def _maybe_set_session_model(
     acp_model: str | None,
     *,
     via_config_option: bool,
+    on_config_options: Callable[[str, Sequence[Any]], None] | None = None,
 ) -> bool:
     """Apply the *initial* session model right after session creation.
 
@@ -865,6 +887,7 @@ async def _maybe_set_session_model(
             acp_model,
             agent_name=agent_name,
             via_config_option=via_config_option,
+            on_config_options=on_config_options,
         )
         return True
     except ACPRequestError as e:
@@ -885,6 +908,7 @@ async def _reapply_session_model_on_resume(
     acp_model: str | None,
     *,
     via_config_option: bool,
+    on_config_options: Callable[[str, Sequence[Any]], None] | None = None,
 ) -> bool:
     """Reapply the persisted model to a *resumed* session.
 
@@ -919,6 +943,7 @@ async def _reapply_session_model_on_resume(
             acp_model,
             agent_name=agent_name,
             via_config_option=via_config_option,
+            on_config_options=on_config_options,
         )
         return True
     except ACPRequestError as e:
@@ -1330,6 +1355,12 @@ class _OpenHandsACPBridge:
         self._fork_lock = threading.Lock()
         self._fork_session_id: str | None = None
         self._fork_accumulated_text: list[str] = []
+        # Latest commands and config options per ACP session id. Each snapshot
+        # is replaced on every change and never mutated, so a reader on another
+        # thread can keep the one it got. Written only on the portal thread.
+        self._session_controls: dict[str, ACPSessionControls] = {}
+        # Called after every recorded change.
+        self.on_session_controls_changed: Callable[[], None] | None = None
 
     def reset(self) -> None:
         self.accumulated_text.clear()
@@ -1422,6 +1453,54 @@ class _OpenHandsACPBridge:
         if self._masking_error is not None:
             raise self._masking_error
 
+    def record_available_commands(
+        self, session_id: str, commands: Sequence[Any]
+    ) -> None:
+        """Mask, normalize and store a session's commands; then notify."""
+        parsed = ACPSessionControls.parse_commands(commands)
+        self._store_session_controls(session_id, "available_commands", parsed)
+        self._notify_session_controls_changed()
+
+    def record_config_options(self, session_id: str, options: Sequence[Any]) -> None:
+        """Mask, normalize and store a session's config options; then notify."""
+        parsed = ACPSessionControls.parse_config_options(options)
+        self._store_session_controls(session_id, "config_options", parsed)
+        self._notify_session_controls_changed()
+
+    def _store_session_controls(
+        self,
+        session_id: str,
+        field: Literal["available_commands", "config_options"],
+        entries: Sequence[BaseModel],
+    ) -> None:
+        """Replace one list of the session's snapshot with ``entries``, masked."""
+        snapshot = self.session_controls(session_id).model_dump()
+        snapshot[field] = self._mask_value([entry.model_dump() for entry in entries])
+        self._session_controls[session_id] = ACPSessionControls.model_validate(snapshot)
+
+    def session_controls(self, session_id: str) -> ACPSessionControls:
+        """The session's latest snapshot; empty if it has reported nothing."""
+        return self._session_controls.get(session_id) or ACPSessionControls()
+
+    def _record_session_controls(self, session_id: str, update: Any) -> bool:
+        """Record an AvailableCommandsUpdate or ConfigOptionUpdate; else False."""
+        if isinstance(update, AvailableCommandsUpdate):
+            self.record_available_commands(session_id, update.available_commands)
+            return True
+        if isinstance(update, ConfigOptionUpdate):
+            self.record_config_options(session_id, update.config_options)
+            return True
+        return False
+
+    def _notify_session_controls_changed(self) -> None:
+        callback = self.on_session_controls_changed
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            logger.warning("Publishing ACP session controls failed", exc_info=True)
+
     # -- Client protocol methods ------------------------------------------
 
     async def session_update(
@@ -1437,6 +1516,8 @@ class _OpenHandsACPBridge:
         # keeps a steadily-working agent alive (unthrottled, unlike the
         # heartbeat in ``_maybe_signal_activity``).
         self._last_activity_monotonic = time.monotonic()
+        if self._record_session_controls(session_id, update):
+            return
 
         # Route fork session updates to the fork accumulator. ask_agent() joins
         # and returns this text to the caller (a UI/network sink), so mask it
@@ -1990,6 +2071,12 @@ class ACPAgent(AgentBase):
         default_factory=set
     )
     _atexit_callback: Callable[[], None] | None = PrivateAttr(default=None)
+    # The sink for the root session's controls (None publishes nothing), and the
+    # ordering state of _publish_session_controls.
+    _on_session_event: Callable[[Event], None] | None = PrivateAttr(default=None)
+    _session_controls_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _published_session_controls: ACPSessionControls | None = PrivateAttr(default=None)
+    _starting_session: bool = PrivateAttr(default=False)
 
     # -- Helpers -----------------------------------------------------------
 
@@ -2242,6 +2329,13 @@ class ACPAgent(AgentBase):
             and self._session_id is not None
             and self._executor is not None
         )
+
+    @property
+    def session_controls(self) -> ACPSessionControls:
+        """The root session's commands and options; empty before a session."""
+        if self._client is None or self._session_id is None:
+            return ACPSessionControls()
+        return self._client.session_controls(self._session_id)
 
     def get_all_llms(self) -> Generator[LLM]:
         yield self.llm
@@ -2910,9 +3004,24 @@ class ACPAgent(AgentBase):
         )
 
     def _start_acp_server(self, state: ConversationState) -> None:
-        """Start the ACP subprocess and initialize the session."""
+        """Start the ACP subprocess and initialize the session.
+
+        Nothing is published while the session starts, since its root id may
+        still be the previous process's; the session's controls are published
+        once it has started.
+        """
+        self._starting_session = True
+        try:
+            self._launch_acp_session(state)
+        finally:
+            self._starting_session = False
+        self._publish_session_controls()
+
+    def _launch_acp_session(self, state: ConversationState) -> None:
+        """Spawn the ACP subprocess and create or load the session."""
         client = _OpenHandsACPBridge()
         self._client = client
+        self._bind_session_controls()
         # Bind the secret masker for the conversation's lifetime. It's derived
         # from state.secret_registry (stable for the conversation) and touches
         # only that registry, so it has none of the cross-thread/state-lock
@@ -3225,6 +3334,9 @@ class ACPAgent(AgentBase):
                         load_response,
                         default_via_config_option=persisted_via_config_option,
                     )
+                    client.record_config_options(
+                        session_id, _session_config_options(load_response)
+                    )
                     logger.info(
                         "Resumed ACP session %s (cwd=%s)",
                         _fingerprint_session_id(session_id),
@@ -3263,6 +3375,9 @@ class ACPAgent(AgentBase):
                     available_models,
                     self._model_via_config_option,
                 ) = _extract_session_models(response)
+                client.record_config_options(
+                    session_id, _session_config_options(response)
+                )
                 # Initial-model protocol call for every built-in provider
                 # (codex, gemini, claude-code). The pinned claude/codex CLIs
                 # ignore the _meta above, so this protocol call is what actually
@@ -3275,6 +3390,7 @@ class ACPAgent(AgentBase):
                     session_id,
                     self.acp_model,
                     via_config_option=self._model_via_config_option,
+                    on_config_options=client.record_config_options,
                 )
                 # set_session_model is the authoritative signal that acp_model
                 # reached the server. _meta is a no-op on the pinned claude CLI,
@@ -3295,6 +3411,7 @@ class ACPAgent(AgentBase):
                     session_id,
                     self.acp_model,
                     via_config_option=self._model_via_config_option,
+                    on_config_options=client.record_config_options,
                 )
 
             # Resolve the model the agent will actually use.
@@ -4497,6 +4614,11 @@ class ACPAgent(AgentBase):
                     model,
                     agent_name=self._agent_name,
                     via_config_option=self._model_via_config_option,
+                    on_config_options=(
+                        self._client.record_config_options
+                        if self._client is not None
+                        else None
+                    ),
                 ),
                 timeout=self.acp_prompt_timeout,
             )
@@ -4543,6 +4665,40 @@ class ACPAgent(AgentBase):
             provider.key if provider else "unknown",
             _fingerprint_session_id(self._session_id),
         )
+
+    def _bind_session_controls(self) -> None:
+        """Point the bridge's change callback at this agent's publisher."""
+        client = self._client
+        if client is None:
+            return
+        # Weak, like the masking hook: the portal loop keeps the bridge alive,
+        # and the bridge must not keep a dropped agent alive.
+        agent_ref = weakref.ref(self)
+
+        def publish() -> None:
+            agent = agent_ref()
+            if agent is not None:
+                agent._publish_session_controls()
+
+        client.on_session_controls_changed = publish
+
+    def _publish_session_controls(self) -> None:
+        """Emit the root session's snapshot through ``_on_session_event``.
+
+        The lock makes the order of submissions the order of snapshots, and the
+        emitter keeps that order, so the last persisted event is the newest
+        snapshot. An unchanged snapshot is not emitted again.
+        """
+        if self._on_session_event is None or self._session_id is None:
+            return
+        if self._starting_session:
+            return
+        with self._session_controls_lock:
+            controls = self._client.session_controls(self._session_id)
+            if controls == self._published_session_controls:
+                return
+            self._published_session_controls = controls
+            self._on_session_event(ACPSessionControlsEvent.from_controls(controls))
 
     def close(self) -> None:
         """Terminate the ACP subprocess and clean up resources."""
