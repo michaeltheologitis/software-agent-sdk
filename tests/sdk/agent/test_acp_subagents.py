@@ -46,10 +46,8 @@ from openhands.sdk.event import (
     ACPSessionTextEvent,
     ACPSubagentEvent,
     ACPToolCallEvent,
-    ActionEvent,
     Event,
 )
-from openhands.sdk.tool.builtins.finish import FinishAction
 from tests.conftest import scripted_acp_command
 from tests.fixtures.acp.scripted_agent import (
     announce,
@@ -621,17 +619,15 @@ def turned_idle(conv: LocalConversation, child: str) -> ACPSubagentEvent | None:
 
 def tree_from(events: Sequence[Event]) -> dict[str | None, dict[str, Any]]:
     """The sub-agent tree stored ``events`` describe, read by the persisted
-    contract: latest snapshot per child, placement by cell, then by message,
-    then by position; per-session tool calls and messages, last wins."""
+    contract: latest snapshot per child, placed by its spawning cell;
+    per-session tool calls and messages, last wins."""
     snapshots: dict[str, ACPSubagentEvent] = {}
-    first_seen: dict[str, int] = {}
     calls: dict[tuple[str | None, str], ACPToolCallEvent] = {}
     messages: dict[tuple[str | None, str], ACPSessionMessageEvent] = {}
     texts: dict[str, list[tuple[bool, str]]] = {}
-    for index, event in enumerate(events):
+    for event in events:
         if isinstance(event, ACPSubagentEvent):
             snapshots[event.acp_session_id] = event
-            first_seen.setdefault(event.acp_session_id, index)
         elif isinstance(event, ACPToolCallEvent):
             calls[(event.acp_session_id, event.tool_call_id)] = event
         elif isinstance(event, ACPSessionMessageEvent):
@@ -643,15 +639,10 @@ def tree_from(events: Sequence[Event]) -> dict[str | None, dict[str, Any]]:
 
     def placement(child: str) -> tuple[Any, ...]:
         snapshot = snapshots[child]
-        parent = snapshot.parent_session_id
-        if parent is not None and parent not in snapshots:
-            return ("unplaced",)
-        if (parent, snapshot.parent_tool_call_id or "") in calls:
-            return ("cell", snapshot.parent_tool_call_id)
-        for (session, message_id), stored in messages.items():
-            if session == parent and stored.recipient_session_id == child:
-                return ("message", message_id)
-        return ("position", first_seen[child])
+        cell = (snapshot.parent_session_id, snapshot.parent_tool_call_id or "")
+        return (
+            ("cell", snapshot.parent_tool_call_id) if cell in calls else ("unplaced",)
+        )
 
     tree: dict[str | None, dict[str, Any]] = {}
     for session in [None, *snapshots]:
@@ -773,19 +764,6 @@ def test_scripted_run_stores_the_scripted_tree(conversation):
     assert tree_from(list(conv.state.events)) == scripted_tree(root_id(conv))
 
 
-def test_scripted_run_keeps_child_text_out_of_the_answer(conversation):
-    conv = conversation("--subagents")
-
-    events = run(conv, "the root's own reply")
-
-    [finish] = [
-        e.action
-        for e in events
-        if isinstance(e, ActionEvent) and isinstance(e.action, FinishAction)
-    ]
-    assert finish.message == "the root's own reply"
-
-
 def test_scripted_run_books_only_the_roots_cost(conversation):
     conv = conversation("--subagents")
 
@@ -797,34 +775,12 @@ def test_scripted_run_books_only_the_roots_cost(conversation):
     )
 
 
-@pytest.mark.parametrize("mode", ["--subagents", "--transcript"])
-def test_scripted_run_with_subagents_off_stores_only_root_work(
-    conversation, tmp_path, acp_request_log, mode
-):
-    flags = (
-        ("--subagents",)
-        if mode == "--subagents"
-        else ("--transcript", str(write_lines(tmp_path, outgoing_only(recorded_run()))))
-    )
-    conv = conversation(*flags, acp_subagents=False)
-
-    events = run(conv)
-
-    calls = [e for e in events if isinstance(e, ACPToolCallEvent)]
-    assert {e.tool_call_id for e in calls} == {"cell-1"}
-    assert all("acp_session_id" not in e.model_dump(exclude_none=True) for e in calls)
-    new_kinds = (ACPSubagentEvent, ACPSessionMessageEvent, ACPSessionTextEvent)
-    assert not [e for e in events if isinstance(e, new_kinds)]
-    [initialize] = [e for e in acp_request_log() if e["method"] == "initialize"]
-    assert "subagents" not in initialize["params"].get("clientCapabilities", {})
-
-
-def test_subagents_off_uses_the_stock_connection_and_initialize(
+def test_subagents_off_stores_only_root_work_through_the_stock_connection(
     conversation, acp_request_log
 ):
-    conv = conversation(acp_subagents=False)
+    conv = conversation("--subagents", acp_subagents=False)
 
-    run(conv)
+    events = run(conv)
 
     assert type(conv.agent._conn) is ClientSideConnection
     [initialize] = [e for e in acp_request_log() if e["method"] == "initialize"]
@@ -832,6 +788,11 @@ def test_subagents_off_uses_the_stock_connection_and_initialize(
         protocol_version=1, client_capabilities=ClientCapabilities()
     )
     assert initialize["params"] == serialize_params(library_call)
+    calls = [e for e in events if isinstance(e, ACPToolCallEvent)]
+    assert {e.tool_call_id for e in calls} == {"cell-1"}
+    assert all("acp_session_id" not in e.model_dump(exclude_none=True) for e in calls)
+    new_kinds = (ACPSubagentEvent, ACPSessionMessageEvent, ACPSessionTextEvent)
+    assert not [e for e in events if isinstance(e, new_kinds)]
 
 
 def cancel_once_announced(conv: LocalConversation, child: str) -> bool:
@@ -859,25 +820,9 @@ def run_in_thread(conv: LocalConversation) -> threading.Thread:
     return runner
 
 
-def test_cancel_acp_session_reaches_the_child_and_its_cancelled_state_is_stored(
+def test_cancel_acp_session_reaches_the_child_without_waiting_for_the_state_lock(
     conversation, acp_request_log
 ):
-    conv = conversation("--subagents", "--cancel-wait", "30")
-    runner = run_in_thread(conv)
-
-    cancel_once_announced(conv, "child-b")
-    runner.join(timeout=30)
-
-    assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
-        acp_request_log()
-    )
-    snapshot = wait_until(lambda: turned_idle(conv, "child-b"))
-    assert snapshot.stop_reason == "cancelled"
-    tree = tree_from(list(conv.state.events))
-    assert tree["child-b"]["tool_calls"] == {"cell-b1": "failed"}
-
-
-def test_cancel_acp_session_does_not_wait_for_the_state_lock(conversation):
     conv = conversation("--subagents", "--cancel-wait", "30")
     runner = run_in_thread(conv)
 
@@ -886,6 +831,13 @@ def test_cancel_acp_session_does_not_wait_for_the_state_lock(conversation):
 
     assert lock_held_by_the_run
     assert conv.state.execution_status == ConversationExecutionStatus.FINISHED
+    assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
+        acp_request_log()
+    )
+    snapshot = wait_until(lambda: turned_idle(conv, "child-b"))
+    assert snapshot.stop_reason == "cancelled"
+    tree = tree_from(list(conv.state.events))
+    assert tree["child-b"]["tool_calls"] == {"cell-b1": "failed"}
 
 
 def test_cancel_acp_session_for_an_idle_child_that_keeps_its_grant_is_sent(

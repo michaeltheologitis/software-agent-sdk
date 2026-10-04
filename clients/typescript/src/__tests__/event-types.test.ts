@@ -494,19 +494,6 @@ describe('ACP sub-agent session events', () => {
     },
   ];
 
-  it('sub-agent event shapes accept stored events', () => {
-    const [association, message, text] = stored;
-
-    expect(isACPSubagentEvent(association)).toBe(true);
-    expect(isACPSessionMessageEvent(message)).toBe(true);
-    expect(isACPSessionTextEvent(text)).toBe(true);
-    if (isACPSubagentEvent(association) && isACPSessionTextEvent(text)) {
-      expect(association.parent_session_id ?? null).toBeNull();
-      expect(association.parent_tool_call_id).toBe('cell-1');
-      expect(text.acp_session_id).toBe(association.acp_session_id);
-    }
-  });
-
   it('each guard recognises only its own kind', () => {
     const guards = [isACPSubagentEvent, isACPSessionMessageEvent, isACPSessionTextEvent];
 

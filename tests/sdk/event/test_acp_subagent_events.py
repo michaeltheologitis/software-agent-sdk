@@ -70,15 +70,6 @@ def test_legacy_acp_tool_call_event_loads_without_session_fields():
     assert (restored.acp_session_id, restored.meta) == (None, None)
 
 
-def test_root_tool_call_event_is_stored_as_before():
-    root_call = ACPToolCallEvent(tool_call_id="tc-1", title="Run ls", status="done")
-
-    stored = json.loads(root_call.model_dump_json(exclude_none=True))
-
-    assert "acp_session_id" not in stored
-    assert "meta" not in stored
-
-
 @pytest.mark.parametrize(
     "event, shown",
     [

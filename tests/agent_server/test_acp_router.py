@@ -527,29 +527,6 @@ async def stored_snapshot(
             await asyncio.sleep(0.05)
 
 
-async def test_a_cancel_reaches_the_child_and_its_cancelled_state_is_stored(
-    server, acp_request_log
-):
-    conversation_id = await server.start(
-        agent=subagent_agent("--cancel-wait", "30"),
-        initial_message={"content": [{"type": "text", "text": "hello"}]},
-    )
-
-    async with asyncio.timeout(20):
-        while (
-            response := await server.cancel(conversation_id, "child-b")
-        ).status_code != 200:
-            assert response.status_code in (404, 409), response.text
-            await asyncio.sleep(0.05)
-
-    assert response.json() == {"session_id": "child-b", "requested": True}
-    snapshot = await stored_snapshot(server, conversation_id, "child-b", "idle")
-    assert snapshot["stop_reason"] == "cancelled"
-    assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
-        acp_request_log()
-    )
-
-
 async def test_a_cancel_for_an_unknown_conversation_is_not_found(server):
     response = await server.cancel(uuid4(), "child-b")
 

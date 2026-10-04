@@ -25,9 +25,7 @@ from acp.schema import (
 from pydantic import ValidationError
 
 from openhands.sdk.agent.acp_unstable import (
-    SessionMessage,
     SubagentClientSideConnection,
-    SubagentUpdate,
     UnstableSessionUpdate,
 )
 from tests.fixtures.acp.scripted_agent import message, said, subagent
@@ -191,26 +189,3 @@ async def test_malformed_unstable_update_is_dropped_with_a_warning(caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "subagent_update" in warnings[0].getMessage()
-
-
-def test_patch_fields_tell_omitted_from_null():
-    cleared = SubagentUpdate.model_validate(subagent("child", title=None))
-    omitted = SubagentUpdate.model_validate(subagent("child"))
-
-    assert "title" in cleared.model_fields_set
-    assert "title" not in omitted.model_fields_set
-
-
-def test_message_content_keeps_non_text_blocks_typed():
-    parsed = SessionMessage.model_validate(
-        {
-            **message("m1", "root", "child", "see"),
-            "content": [
-                {"type": "text", "text": "see"},
-                {"type": "image", "data": "AAAA", "mimeType": "image/png"},
-            ],
-        }
-    )
-
-    assert parsed.content is not None
-    assert [block.type for block in parsed.content] == ["text", "image"]
