@@ -197,6 +197,18 @@ class TestRenderResumeTranscript:
         assert out.count("[TOOL USE: bash]") == 1
         assert "(completed)" in out
 
+    def test_resume_transcript_skips_child_tool_calls(self) -> None:
+        root_call = _tool("tc-1", title="spawn", raw_output="spawned")
+        child_call = _tool("tc-1", title="child work", raw_output="hidden").model_copy(
+            update={"acp_session_id": "child-a"}
+        )
+
+        out = render_resume_transcript([root_call, child_call])
+
+        assert out is not None
+        assert "[TOOL USE: spawn]" in out
+        assert "child work" not in out
+
     def test_preserves_order_across_event_types(self) -> None:
         events = [
             _user("first user"),

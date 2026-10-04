@@ -15,6 +15,9 @@ from openhands.sdk.conversation.visualizer.base import (
 )
 from openhands.sdk.event import (
     ACPSessionControlsEvent,
+    ACPSessionMessageEvent,
+    ACPSessionTextEvent,
+    ACPSubagentEvent,
     ACPToolCallEvent,
     ActionEvent,
     AgentErrorEvent,
@@ -215,6 +218,18 @@ EVENT_VISUALIZATION_CONFIG: dict[type[Event], EventVisualizationConfig] = {
     ACPToolCallEvent: EventVisualizationConfig(
         title="ACP Tool Call",
         color=_ACTION_COLOR,
+    ),
+    ACPSubagentEvent: EventVisualizationConfig(
+        title="ACP Sub-agent",
+        color=_ACTION_COLOR,
+    ),
+    ACPSessionMessageEvent: EventVisualizationConfig(
+        title="ACP Session Message",
+        color=_MESSAGE_ASSISTANT_COLOR,
+    ),
+    ACPSessionTextEvent: EventVisualizationConfig(
+        title="ACP Sub-agent Text",
+        color=_MESSAGE_ASSISTANT_COLOR,
     ),
     SystemPromptEvent: EventVisualizationConfig(
         title="System Prompt",
