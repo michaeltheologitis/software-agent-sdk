@@ -4,17 +4,20 @@ Units feed the bridge (``_OpenHandsACPBridge(subagents=True)``) wire updates, th
 way the ACP connection does, and read what it hands the turn and the
 conversation's emitter. The rest run a real ``LocalConversation`` against the
 scripted ACP agent in ``tests/fixtures/acp/scripted_agent.py``: its
-``--subagents`` run.
+``--subagents`` run, or a JSONL transcript it replays.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -818,6 +821,101 @@ def test_cancel_acp_session_without_a_live_connection_is_refused(conversation):
         conv.cancel_acp_session("child-b")
 
 
+# -- Transcripts --------------------------------------------------------------------
+
+
+TRANSCRIPT_ROOT = "s-root"
+
+
+def request(request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+
+
+def response(request_id: int, result: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def update(session_id: str, value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": session_id, "update": value},
+    }
+
+
+def recorded_run(*, worker_finishes: bool = True) -> list[dict[str, Any]]:
+    """A full recording of one turn: the client's requests and the agent's lines."""
+    root = TRANSCRIPT_ROOT
+    worker_end = (
+        [update("worker", tool_done("w1")), update(root, idle("worker"))]
+        if worker_finishes
+        else []
+    )
+    return [
+        request(0, "initialize", {"protocolVersion": 1}),
+        response(0, {"protocolVersion": 1, "agentCapabilities": {}}),
+        request(1, "session/new", {"cwd": "/w", "mcpServers": []}),
+        response(1, {"sessionId": root}),
+        request(2, "session/prompt", {"sessionId": root, "prompt": [text("go")]}),
+        update(root, tool_call("cell-1")),
+        update(root, announce("worker", title="Work")),
+        update(root, message("task", root, "worker", "Do it.")),
+        update(root, announce("helper", title="Help")),
+        update("helper", said("Helped.")),
+        update(root, idle("helper")),
+        update("worker", thought("Thinking.")),
+        update("worker", tool_call("w1")),
+        update("worker", usage(0.0002)),
+        update("worker", message("answer", "worker", root, "Done.")),
+        *worker_end,
+        update(root, tool_done("cell-1")),
+        update(root, said("All done.")),
+        update(root, usage(0.0005)),
+        response(2, {"stopReason": "end_turn"}),
+    ]
+
+
+def outgoing_only(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What the agent sent: the shape of a recording made on the agent's side."""
+    return [line for line in lines if "result" in line or "update" in line["params"]]
+
+
+def write_lines(tmp_path: Path, lines: list[dict[str, Any]]) -> Path:
+    path = tmp_path / f"transcript-{uuid.uuid4().hex}.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    return path
+
+
+RECORDED_TREE: dict[str | None, dict[str, Any]] = {
+    None: {
+        "tool_calls": {"cell-1": "completed"},
+        "messages": {"task": (TRANSCRIPT_ROOT, "worker", "Do it.")},
+    },
+    "worker": child_node(
+        None,
+        "cell-1",
+        cost=(0.0002, "USD"),
+        tool_calls={"w1": "completed"},
+        messages={"answer": ("worker", TRANSCRIPT_ROOT, "Done.")},
+        texts=[(True, "Thinking.")],
+    ),
+    "helper": child_node(None, "cell-1", texts=[(False, "Helped.")]),
+}
+
+
+@pytest.mark.parametrize("recording", ["full", "outgoing-only"])
+def test_scripted_transcript_replays_a_recording(conversation, tmp_path, recording):
+    lines = recorded_run()
+    if recording == "outgoing-only":
+        lines = outgoing_only(lines)
+    conv = conversation("--transcript", str(write_lines(tmp_path, lines)))
+
+    run(conv)
+    wait_until(lambda: turned_idle(conv, "worker"))
+
+    assert tree_from(list(conv.state.events)) == RECORDED_TREE
+
+
 # -- Ordering, as the persisted contract states it ------------------------------------
 
 
@@ -847,6 +945,49 @@ def test_a_childs_stored_timestamps_never_decrease_in_log_order(conversation):
     assert set(by_child) == {"child-a", "child-a-1", "child-b", "child-c"}
     for stamps in by_child.values():
         assert stamps == sorted(stamps)
+
+
+def answers(conv: LocalConversation) -> int:
+    """How many times the worker's answer, its last line in a turn, is stored."""
+    return sum(
+        1
+        for e in conv.state.events
+        if isinstance(e, ACPSessionMessageEvent) and e.message_id == "answer"
+    )
+
+
+def test_a_reconnect_snapshot_is_later_than_the_childs_earlier_events(
+    conversation, tmp_path
+):
+    transcript = str(write_lines(tmp_path, recorded_run(worker_finishes=False)))
+    first = conversation("--transcript", transcript)
+    run(first)
+    wait_until(lambda: answers(first) == 1)
+    first.close()
+
+    second = conversation(conversation_id=first.id)
+    run(second)
+    wait_until(lambda: answers(second) == 2)
+    events = list(second.state.events)
+
+    reconnects = [
+        e
+        for e in events
+        if isinstance(e, ACPSubagentEvent) and e.source == "environment"
+    ]
+    [reconnect] = reconnects
+    assert (reconnect.acp_session_id, reconnect.state, reconnect.cancellable) == (
+        "worker",
+        None,
+        False,
+    )
+    position = events.index(reconnect)
+    earlier = [e for e in events[:position] if session_of(e) == "worker"]
+    assert earlier
+    assert all(stored_at(e) < stored_at(reconnect) for e in earlier)
+    later = [e for e in events[position + 1 :] if session_of(e) == "worker"]
+    assert later
+    assert all(stored_at(reconnect) <= stored_at(e) for e in later)
 
 
 def test_a_spawning_cells_started_event_precedes_its_whole_subtree(conversation):
