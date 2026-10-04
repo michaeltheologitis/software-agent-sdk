@@ -51,7 +51,9 @@ from openhands.agent_server.utils import safe_rmtree, utc_now
 from openhands.sdk import LLM, AgentContext, Event, Message
 from openhands.sdk.agent import ACPAgent
 from openhands.sdk.agent.acp_file_credentials import CODEX_AUTH_SECRET_NAME
+from openhands.sdk.agent.acp_models import ACPSessionControls
 from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.conversation.acp_preview import preview_acp_session
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.persistence_const import BASE_STATE
 from openhands.sdk.conversation.state import (
@@ -302,6 +304,10 @@ def _prepare_request_workspace(
 
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidACPConfigOptions(ValueError):
+    """acp_config_options sent with an agent that is not an ACP agent."""
 
 
 class InvalidParentConversation(ValueError):
@@ -1658,89 +1664,7 @@ class ConversationService:
         # Profile resolution and the load_memory stamp must happen before
         # _prepare_request_workspace (which asserts request.agent is not None)
         # and before model_dump so the resolved agent is captured in request_data.
-        runtime_profile = os.getenv("OH_RUNTIME_LAUNCHED_PROFILE")
-        launched_agent_profile = (
-            LaunchedAgentProfile.model_validate_json(runtime_profile)
-            if runtime_profile
-            else None
-        )
-
-        from openhands.agent_server.persistence import (
-            PersistedSettings,
-            get_settings_store,
-        )
-
-        # get_settings_store() is safe here: get_instance() initialises the
-        # singleton with the server cipher before any conversation can start.
-        # FileSettingsStore.load re-raises PermissionError/OSError by design;
-        # now that every launch reads it, a bad file mode must not take down
-        # request shapes that need nothing from settings.
-        try:
-            settings = await asyncio.to_thread(
-                lambda: get_settings_store().load() or PersistedSettings()
-            )
-        except (PermissionError, OSError):
-            logger.warning(
-                "Cannot read settings; starting without the stored agent preferences",
-                exc_info=True,
-            )
-            settings = PersistedSettings()
-
-        # ``ACPAgentSettings.agent_context`` is nullable, hence the guard.
-        stored_context = settings.agent_settings.agent_context
-        load_memory = bool(stored_context and stored_context.load_memory)
-
-        if request.agent_profile_id is not None:
-            mcp_config = settings.agent_settings.mcp_config
-            (
-                resolved_agent,
-                launched_agent_profile,
-                allowed_secrets,
-            ) = await asyncio.to_thread(
-                _resolve_agent_from_profile,
-                request.agent_profile_id,
-                self.cipher,
-                mcp_config,
-                acp_skill_sourcing=self.acp_skill_sourcing,
-            )
-            updates: dict[str, Any] = {"agent": resolved_agent}
-            # Enforced here, not client-side: a caller that sends more secrets
-            # than the profile allows must not widen the agent's scope.
-            if allowed_secrets is not None:
-                updates["secrets"] = {
-                    name: value
-                    for name, value in request.secrets.items()
-                    if name in allowed_secrets
-                }
-            request = request.model_copy(update=updates)
-
-        # Applied unconditionally: a serialized agent always carries
-        # ``load_memory`` (model_dump emits defaults), so there is no way to
-        # tell a deliberate ``false`` from an echoed one. Opting a single
-        # conversation out needs a tri-state field; tracked separately.
-        if load_memory and request.agent is not None:
-            request = request.model_copy(
-                update={"agent": _with_load_memory(request.agent)}
-            )
-
-        request = request.model_copy(
-            update={
-                "agent": _apply_acp_skill_sourcing(
-                    request.agent, self.acp_skill_sourcing
-                )
-            }
-        )
-
-        additions = request.agent_launch_additions
-        suffix = (
-            additions.system_message_suffix_append.strip()
-            if additions and additions.system_message_suffix_append
-            else ""
-        )
-        if suffix:
-            request = request.model_copy(
-                update={"agent": _append_system_message_suffix(request.agent, suffix)}
-            )
+        request, launched_agent_profile = await self._resolve_launch(request)
 
         request = _prepare_request_workspace(
             request, conversation_id, self.conversation_worktree_root
@@ -1842,7 +1766,11 @@ class ConversationService:
         request_data = request.model_dump(
             mode="json",
             context={"expose_secrets": True},
-            exclude={"agent_profile_id", "agent_launch_additions"},
+            exclude={
+                "agent_profile_id",
+                "agent_launch_additions",
+                "acp_config_options",
+            },
         )
 
         # The agent is persisted to base_state.json (not meta.json), so it must
@@ -1915,6 +1843,155 @@ class ConversationService:
         )
 
         return conversation_info, True
+
+    async def _resolve_launch(
+        self, request: StartConversationRequest
+    ) -> tuple[StartConversationRequest, LaunchedAgentProfile | None]:
+        """Resolve the request's agent as its launch will run it.
+
+        Settings, profile resolution and its secret allow-list, load_memory,
+        ACP skill sourcing and launch additions, then the acp_config_options
+        fold.
+
+        Raises:
+            ProfileNotFound: Unknown agent_profile_id.
+            DanglingMcpServerRef: The profile references a missing MCP server.
+            InvalidACPConfigOptions: Option values for a non-ACP agent.
+        """
+        runtime_profile = os.getenv("OH_RUNTIME_LAUNCHED_PROFILE")
+        launched_agent_profile = (
+            LaunchedAgentProfile.model_validate_json(runtime_profile)
+            if runtime_profile
+            else None
+        )
+
+        from openhands.agent_server.persistence import (
+            PersistedSettings,
+            get_settings_store,
+        )
+
+        # get_settings_store() is safe here: get_instance() initialises the
+        # singleton with the server cipher before any conversation can start.
+        # FileSettingsStore.load re-raises PermissionError/OSError by design;
+        # now that every launch reads it, a bad file mode must not take down
+        # request shapes that need nothing from settings.
+        try:
+            settings = await asyncio.to_thread(
+                lambda: get_settings_store().load() or PersistedSettings()
+            )
+        except (PermissionError, OSError):
+            logger.warning(
+                "Cannot read settings; starting without the stored agent preferences",
+                exc_info=True,
+            )
+            settings = PersistedSettings()
+
+        # ``ACPAgentSettings.agent_context`` is nullable, hence the guard.
+        stored_context = settings.agent_settings.agent_context
+        load_memory = bool(stored_context and stored_context.load_memory)
+
+        if request.agent_profile_id is not None:
+            mcp_config = settings.agent_settings.mcp_config
+            (
+                resolved_agent,
+                launched_agent_profile,
+                allowed_secrets,
+            ) = await asyncio.to_thread(
+                _resolve_agent_from_profile,
+                request.agent_profile_id,
+                self.cipher,
+                mcp_config,
+                acp_skill_sourcing=self.acp_skill_sourcing,
+            )
+            updates: dict[str, Any] = {"agent": resolved_agent}
+            # Enforced here, not client-side: a caller that sends more secrets
+            # than the profile allows must not widen the agent's scope.
+            if allowed_secrets is not None:
+                updates["secrets"] = {
+                    name: value
+                    for name, value in request.secrets.items()
+                    if name in allowed_secrets
+                }
+            request = request.model_copy(update=updates)
+
+        # Applied unconditionally: a serialized agent always carries
+        # ``load_memory`` (model_dump emits defaults), so there is no way to
+        # tell a deliberate ``false`` from an echoed one. Opting a single
+        # conversation out needs a tri-state field; tracked separately.
+        if load_memory and request.agent is not None:
+            request = request.model_copy(
+                update={"agent": _with_load_memory(request.agent)}
+            )
+
+        request = request.model_copy(
+            update={
+                "agent": _apply_acp_skill_sourcing(
+                    request.agent, self.acp_skill_sourcing
+                )
+            }
+        )
+
+        additions = request.agent_launch_additions
+        suffix = (
+            additions.system_message_suffix_append.strip()
+            if additions and additions.system_message_suffix_append
+            else ""
+        )
+        if suffix:
+            request = request.model_copy(
+                update={"agent": _append_system_message_suffix(request.agent, suffix)}
+            )
+
+        if request.acp_config_options:
+            if not isinstance(request.agent, ACPAgent):
+                raise InvalidACPConfigOptions(
+                    "acp_config_options requires an ACP agent"
+                )
+            agent = request.agent.model_copy(
+                update={
+                    "acp_config_options": {
+                        **request.agent.acp_config_options,
+                        **request.acp_config_options,
+                    }
+                }
+            )
+            request = request.model_copy(update={"agent": agent})
+        return request, launched_agent_profile
+
+    async def preview_acp_session(
+        self, request: StartConversationRequest
+    ) -> ACPSessionControls:
+        """What an ACP agent would offer for this start request, before it exists.
+
+        Resolves the agent exactly as a start would, then starts it in a
+        throwaway state under the conversations directory, holding a run slot.
+
+        Raises:
+            ValueError: The resolved agent is not an ACP agent.
+            ConversationRunLimitExceeded: The run limit is reached.
+            ACPPreviewError: The agent failed to start or refused a value.
+        """
+        request, _ = await self._resolve_launch(request)
+        agent = request.agent
+        if not isinstance(agent, ACPAgent):
+            raise ValueError("preview needs an ACP agent")
+        # A direct child of the conversations directory, so the agent shares
+        # the conversations' npm cache; without a meta.json the catalog skips it.
+        persistence_dir = self.conversations_dir / f"preview-{uuid4().hex}"
+        with await RunSlot.acquire(self._run_semaphore):
+            try:
+                return await asyncio.to_thread(
+                    preview_acp_session,
+                    agent,
+                    request.workspace,
+                    persistence_dir,
+                    secrets=request.secrets,
+                    cipher=self.cipher,
+                )
+            finally:
+                await asyncio.to_thread(
+                    safe_rmtree, persistence_dir, "ACP preview directory"
+                )
 
     async def pause_conversation(self, conversation_id: UUID) -> bool:
         event_service = await self._get_or_load_event_service(conversation_id)

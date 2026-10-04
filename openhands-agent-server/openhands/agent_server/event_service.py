@@ -33,6 +33,7 @@ from openhands.sdk.agent.acp_file_credentials import (
     CODEX_AUTH_SECRET_NAME,
     is_valid_codex_auth,
 )
+from openhands.sdk.agent.acp_models import ACPSessionControls
 from openhands.sdk.agent.stream_context import StreamProgress
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.conversation.event_store import EventLog
@@ -2023,6 +2024,21 @@ class EventService:
             raise ValueError("inactive_service")
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
+
+    async def set_acp_config_option(
+        self, config_id: str, value: str | bool
+    ) -> ACPSessionControls | None:
+        """Run LocalConversation.set_acp_config_option off the event loop.
+
+        Returns the agent's controls after a live set, or None when the value is
+        kept for the session's start.
+        """
+        if self._conversation is None:
+            raise ValueError("inactive_service")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._conversation.set_acp_config_option, config_id, value
+        )
 
     async def close(self):
         if self.bash_event_service is not None:

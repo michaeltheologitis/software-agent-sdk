@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
+from openhands.agent_server.acp_router import acp_router, conversation_acp_router
 from openhands.agent_server.agent_profiles_router import agent_profiles_router
 from openhands.agent_server.auth_router import auth_router
 from openhands.agent_server.bash_router import bash_router
@@ -453,6 +454,8 @@ def _add_api_routes(app: FastAPI) -> None:
     api_router.include_router(conversation_catalog_router)
     conversation_registry.add_execution_routes(api_router)
     api_router.include_router(conversation_router)
+    api_router.include_router(conversation_acp_router)
+    api_router.include_router(acp_router)
     api_router.include_router(credential_binding_router)
     api_router.include_router(tool_router)
     api_router.include_router(bash_router)
