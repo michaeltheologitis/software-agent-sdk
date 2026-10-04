@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import threading
 import time
 import uuid
@@ -48,7 +49,7 @@ from openhands.sdk.event import (
     ACPToolCallEvent,
     Event,
 )
-from tests.conftest import subagent_snapshots, wait_until
+from tests.conftest import scripted_acp_command, subagent_snapshots, wait_until
 from tests.fixtures.acp.scripted_agent import (
     announce,
     idle,
@@ -920,6 +921,24 @@ def test_scripted_transcript_replays_a_recording(conversation, tmp_path, recordi
     wait_until(lambda: turned_idle(conv, "worker"))
 
     assert tree_from(list(conv.state.events)) == RECORDED_TREE
+
+
+def test_transcript_exits_non_zero_when_a_wait_point_outlasts_the_wait_timeout(
+    tmp_path,
+):
+    path = write_lines(tmp_path, outgoing_only(recorded_run()))
+    command = scripted_acp_command("--transcript", str(path), "--wait-timeout", "0.2")
+
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ) as agent:
+        try:
+            assert agent.wait(timeout=10) != 0
+        finally:
+            agent.kill()
 
 
 # -- Ordering, as the persisted contract states it ------------------------------------
