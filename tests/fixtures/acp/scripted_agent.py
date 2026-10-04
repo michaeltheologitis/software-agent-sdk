@@ -566,12 +566,7 @@ class TranscriptPlayer:
     def on_initialize(self, params: dict[str, Any]) -> None:
         self.advertised = advertises_subagents(params)
 
-    async def handle(
-        self,
-        method: str,
-        params: Any,
-        is_notification: bool,
-    ) -> Any:
+    async def handle(self, method: str, params: Any, is_notification: bool) -> Any:
         """The connection's handler: hand a client message to the player."""
         if self._finished:
             return self._refuse(_Incoming(method, params, None), is_notification)

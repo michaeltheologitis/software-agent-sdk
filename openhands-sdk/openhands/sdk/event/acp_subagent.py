@@ -60,8 +60,7 @@ class ACPSubagentEvent(Event):
     )
     stop_reason: str | None = None
     cancellable: bool = Field(
-        default=False,
-        description="Whether a client may cancel this child's work now.",
+        default=False, description="Whether a client may cancel this child's work now."
     )
     cost: float | None = Field(
         default=None,
@@ -69,8 +68,7 @@ class ACPSubagentEvent(Event):
     )
     cost_currency: str | None = None
     meta: dict[str, Any] | None = Field(
-        default=None,
-        description="The association's ACP _meta, verbatim.",
+        default=None, description="The association's ACP _meta, verbatim."
     )
 
     @property

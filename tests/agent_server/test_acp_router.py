@@ -114,8 +114,7 @@ class Server:
 
     async def events(self, conversation_id: UUID) -> list[dict[str, Any]]:
         response = await self.client.get(
-            f"/api/conversations/{conversation_id}/events/search",
-            params={"limit": 100},
+            f"/api/conversations/{conversation_id}/events/search", params={"limit": 100}
         )
         return response.json()["items"]
 

@@ -2698,8 +2698,7 @@ def test_acp_subagent_sessions_over_live_server(server_env, acp_request_log):
 
             def rest_events() -> list[dict]:
                 return client.get(
-                    f"/api/conversations/{conv.id}/events/search",
-                    params={"limit": 100},
+                    f"/api/conversations/{conv.id}/events/search", params={"limit": 100}
                 ).json()["items"]
 
             def child_b_cancelled() -> bool:

@@ -100,9 +100,7 @@ class ACPSubagentSessions:
         return None if session_id == self.root_session_id else session_id
 
     def on_subagent_update(
-        self,
-        session_id: str,
-        update: SubagentUpdate,
+        self, session_id: str, update: SubagentUpdate
     ) -> list[Event]:
         child = update.session_id
         if child in (self.root_session_id, session_id):
@@ -129,9 +127,7 @@ class ACPSubagentSessions:
         return [*events, self._snapshot(child)]
 
     def on_session_message(
-        self,
-        session_id: str,
-        update: SessionMessage,
+        self, session_id: str, update: SessionMessage
     ) -> list[Event]:
         if self.replaying:
             return []
@@ -145,9 +141,7 @@ class ACPSubagentSessions:
         return [*events, self._message_event(session_id, update.message_id)]
 
     def on_session_message_chunk(
-        self,
-        session_id: str,
-        update: SessionMessageChunk,
+        self, session_id: str, update: SessionMessageChunk
     ) -> list[Event]:
         if self.replaying:
             return []
@@ -168,11 +162,7 @@ class ACPSubagentSessions:
         return events
 
     def on_child_text(
-        self,
-        session_id: str,
-        text: str,
-        *,
-        thought: bool,
+        self, session_id: str, text: str, *, thought: bool
     ) -> list[Event]:
         if self.replaying:
             return []
@@ -188,11 +178,7 @@ class ACPSubagentSessions:
         pending.parts.append(text)
         return events
 
-    def on_child_usage(
-        self,
-        session_id: str,
-        update: UsageUpdate,
-    ) -> list[Event]:
+    def on_child_usage(self, session_id: str, update: UsageUpdate) -> list[Event]:
         association = self._children.get(session_id)
         if self.replaying or association is None:
             return []
@@ -258,9 +244,7 @@ class ACPSubagentSessions:
         return ACPSubagentEvent.model_validate({**association, "source": source})
 
     def _message(
-        self,
-        session_id: str,
-        update: SessionMessage | SessionMessageChunk,
+        self, session_id: str, update: SessionMessage | SessionMessageChunk
     ) -> _Message:
         """The resolved message, with any participants the update names."""
         message = self._messages.setdefault((session_id, update.message_id), _Message())

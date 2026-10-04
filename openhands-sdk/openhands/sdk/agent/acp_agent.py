@@ -109,9 +109,9 @@ from openhands.sdk.agent.acp_subagents import (
 from openhands.sdk.agent.acp_tracing import ACPTurnTrace
 from openhands.sdk.agent.acp_unstable import (
     SessionMessage,
-    SessionMessageChunk,
     SubagentClientSideConnection,
     SubagentUpdate,
+    UnstableSessionUpdate,
 )
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.agent.stream_context import StreamContext
@@ -1600,9 +1600,7 @@ class _OpenHandsACPBridge:
         return False
 
     def unstable_session_update(
-        self,
-        session_id: str,
-        update: SubagentUpdate | SessionMessage | SessionMessageChunk,
+        self, session_id: str, update: UnstableSessionUpdate
     ) -> None:
         """Route one unstable sub-agent update; never awaits, so it keeps wire order."""
         self._last_activity_monotonic = time.monotonic()

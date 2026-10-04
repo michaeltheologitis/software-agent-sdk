@@ -304,8 +304,7 @@ async def test_message_upsert_replaces_content_and_keeps_participants(wire):
         },
     )
     await wire.send(
-        ROOT,
-        {"sessionUpdate": "session_message", "messageId": "task", "content": None},
+        ROOT, {"sessionUpdate": "session_message", "messageId": "task", "content": None}
     )
 
     stored = [e for e in wire.emitted if isinstance(e, ACPSessionMessageEvent)]
@@ -411,9 +410,7 @@ async def test_child_call_open_across_aborted_turns_is_failed_once_and_the_agent
     ] == [("c1", "in_progress"), ("c1", "failed"), ("c1", "completed")]
 
 
-async def test_child_events_go_to_the_session_emitter_and_root_events_to_the_turn(
-    wire,
-):
+async def test_child_events_go_to_the_session_emitter_and_root_events_to_the_turn(wire):
     await wire.send(ROOT, tool_call("cell-1"), announce("child-a"))
     await wire.send(ROOT, message("task", ROOT, "child-a", "Go."))
     await wire.send("child-a", thought("Hm."), tool_call("c1"), tool_done("c1"))
@@ -557,9 +554,7 @@ async def test_unstable_updates_on_an_unannounced_session_stay_under_that_sessio
     stranger = "stranger-session"
     with caplog.at_level(logging.WARNING):
         await wire.send(
-            stranger,
-            announce("child-x"),
-            message("task", stranger, "child-x", "Go."),
+            stranger, announce("child-x"), message("task", stranger, "child-x", "Go.")
         )
 
     assert wire.latest("child-x").parent_session_id == stranger

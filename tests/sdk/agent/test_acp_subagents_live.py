@@ -60,9 +60,7 @@ def descendants(snapshots: dict[str, ACPSubagentEvent], session: str) -> set[str
 
 
 @pytest.fixture
-def live_conversation(
-    tmp_path: Path,
-) -> Iterator[Callable[..., LocalConversation]]:
+def live_conversation(tmp_path: Path) -> Iterator[Callable[..., LocalConversation]]:
     conversations: list[LocalConversation] = []
     workspace = tmp_path / "workspace"
     workspace.mkdir()

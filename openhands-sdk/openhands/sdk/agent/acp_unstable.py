@@ -74,10 +74,7 @@ class SubagentState(ACPModel):
 
 
 class SubagentUpdate(ACPModel):
-    session_update: Annotated[
-        Literal["subagent_update"],
-        Field(alias="sessionUpdate"),
-    ]
+    session_update: Annotated[Literal["subagent_update"], Field(alias="sessionUpdate")]
     session_id: Annotated[str, Field(alias="sessionId")]
     title: str | None = None
     description: str | None = None
@@ -87,15 +84,9 @@ class SubagentUpdate(ACPModel):
 
 
 class SessionMessage(ACPModel):
-    session_update: Annotated[
-        Literal["session_message"],
-        Field(alias="sessionUpdate"),
-    ]
+    session_update: Annotated[Literal["session_message"], Field(alias="sessionUpdate")]
     message_id: Annotated[str, Field(alias="messageId")]
-    sender_session_id: Annotated[
-        str | None,
-        Field(alias="senderSessionId"),
-    ] = None
+    sender_session_id: Annotated[str | None, Field(alias="senderSessionId")] = None
     recipient_session_id: Annotated[
         str | None,
         Field(alias="recipientSessionId"),
@@ -106,14 +97,10 @@ class SessionMessage(ACPModel):
 
 class SessionMessageChunk(ACPModel):
     session_update: Annotated[
-        Literal["session_message_chunk"],
-        Field(alias="sessionUpdate"),
+        Literal["session_message_chunk"], Field(alias="sessionUpdate")
     ]
     message_id: Annotated[str, Field(alias="messageId")]
-    sender_session_id: Annotated[
-        str | None,
-        Field(alias="senderSessionId"),
-    ] = None
+    sender_session_id: Annotated[str | None, Field(alias="senderSessionId")] = None
     recipient_session_id: Annotated[
         str | None,
         Field(alias="recipientSessionId"),
@@ -143,15 +130,14 @@ class _SubagentInitializeRequest(InitializeRequest):
     """Serializes a capabilities subclass whole, so ``subagents`` reaches the wire."""
 
     client_capabilities: Annotated[
-        SerializeAsAny[ClientCapabilities] | None,
-        Field(alias="clientCapabilities"),
+        SerializeAsAny[ClientCapabilities] | None, Field(alias="clientCapabilities")
     ] = None
 
 
 # ClientSideConnection is @final in agent-client-protocol 0.12.1; this subclass
 # lives only until the library parses ACP's sub-agent updates itself.
 class SubagentClientSideConnection(
-    ClientSideConnection,  # pyright: ignore[reportGeneralTypeIssues]
+    ClientSideConnection  # pyright: ignore[reportGeneralTypeIssues]
 ):
     """A ClientSideConnection that hands ACP's unstable sub-agent updates to a
     callback ahead of the library's router, and advertises ``subagents``."""
@@ -192,17 +178,14 @@ class SubagentClientSideConnection(
 
 
 def route_unstable_updates(
-    inner: MethodHandler,
-    on_unstable_update: UnstableUpdateHandler,
+    inner: MethodHandler, on_unstable_update: UnstableUpdateHandler
 ) -> MethodHandler:
     """Wrap a connection handler: the three unstable updates reach
     ``on_unstable_update`` synchronously, in arrival order; an invalid one is
     logged and dropped; every other message goes to ``inner``."""
 
     async def handler(
-        method: str,
-        params: JsonValue | None,
-        is_notification: bool,
+        method: str, params: JsonValue | None, is_notification: bool
     ) -> JsonValue | None:
         kind = _unstable_update_kind(method, params, is_notification)
         if kind is None:
@@ -228,9 +211,7 @@ def route_unstable_updates(
 
 
 def _unstable_update_kind(
-    method: str,
-    params: JsonValue | None,
-    is_notification: bool,
+    method: str, params: JsonValue | None, is_notification: bool
 ) -> str | None:
     """The ``sessionUpdate`` of an unstable session/update notification, else None."""
     if not is_notification or method != CLIENT_METHODS["session_update"]:
