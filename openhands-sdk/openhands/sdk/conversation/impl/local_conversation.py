@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from typing import Any, Final, TypeGuard, cast
 
-from openhands.sdk.agent.acp_agent import ACPAgent
+from openhands.sdk.agent.acp_agent import ACPAgent, _check_config_option_id
+from openhands.sdk.agent.acp_models import ACPSessionControls
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.agent.stream_context import StreamProgressCallbackType
 from openhands.sdk.context.condenser import CondenserBase, LLMSummarizingCondenser
@@ -1790,6 +1791,43 @@ class LocalConversation(BaseConversation):
                 **self._state.agent_state,
                 "acp_current_model_id": model,
             }
+
+    def set_acp_config_option(
+        self, config_id: str, value: str | bool
+    ) -> ACPSessionControls | None:
+        """Set an ACP session config option, live or for the session's start.
+
+        Live: issues session/set_config_option and returns the resulting
+        controls. Not yet started: returns None and the value is applied after
+        session/new. Either way the value is persisted on the agent.
+
+        Raises:
+            ValueError: Not an ACP conversation, or ``config_id`` is empty or
+                ``"model"``.
+            ACPConfigOptionRejectedError: The server refused the value.
+            TimeoutError: No answer within ``ACP_CONFIG_OPTION_TIMEOUT``.
+        """
+        if not isinstance(self.agent, ACPAgent):
+            raise ValueError(
+                "set_acp_config_option is only supported for ACP conversations."
+            )
+        _check_config_option_id(config_id)
+        with self._state:
+            live = self.agent.has_live_acp_session
+            # A refusal propagates from the live call before anything is written.
+            controls = (
+                self.agent.set_acp_config_option(config_id, value) if live else None
+            )
+            self._replace_acp_agent(
+                {
+                    "acp_config_options": {
+                        **self.agent.acp_config_options,
+                        config_id: value,
+                    }
+                },
+                live=live,
+            )
+        return controls
 
     def _replace_acp_agent(
         self,

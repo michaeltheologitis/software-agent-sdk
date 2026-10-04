@@ -33,11 +33,12 @@ from collections.abc import (
     Collection,
     Generator,
     Iterable,
+    Mapping,
     Sequence,
 )
 from concurrent.futures import Future
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple
 
 from acp.client.connection import ClientSideConnection
 from acp.exceptions import RequestError as ACPRequestError
@@ -76,6 +77,7 @@ from acp.schema import (
 )
 from acp.transports import default_environment
 from pydantic import (
+    AfterValidator,
     BaseModel,
     Field,
     PrivateAttr,
@@ -179,6 +181,11 @@ _ACP_CANCEL_DRAIN_TIMEOUT: float = float(
 )
 
 _ACP_AUTH_TIMEOUT: float = float(os.environ.get("ACP_AUTH_TIMEOUT", "30.0"))
+# Bound for one session/set_config_option round-trip. Shorter than the prompt
+# timeout: the call holds the conversation lock while a user waits on it.
+_ACP_CONFIG_OPTION_TIMEOUT: float = float(
+    os.environ.get("ACP_CONFIG_OPTION_TIMEOUT", "30.0")
+)
 _ACP_NPX_CACHE_WARM_TIMEOUT: float = float(
     os.environ.get("ACP_NPX_CACHE_WARM_TIMEOUT", "300")
 )
@@ -574,6 +581,66 @@ _MODEL_CONFIG_OPTION_ID = "model"
 _CODEX_REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
     {"low", "medium", "high", "xhigh"}
 )
+
+
+class ACPConfigOptionRejectedError(ValueError):
+    """The ACP server refused a session/set_config_option.
+
+    ``str()`` is the server's own message, masked.
+    """
+
+    def __init__(self, config_id: str, value: str | bool, message: str) -> None:
+        super().__init__(message)
+        self.config_id = config_id
+        self.value = value
+
+
+def _check_config_option_id(config_id: str) -> None:
+    """Refuse an empty id, and the model option, which switch_acp_model owns."""
+    if not config_id:
+        raise ValueError("config_id must be a non-empty string")
+    if config_id == _MODEL_CONFIG_OPTION_ID:
+        raise ValueError(
+            "The 'model' option is set with switch_acp_model, not as a config option."
+        )
+
+
+def _check_config_option_ids(values: dict[str, str | bool]) -> dict[str, str | bool]:
+    for config_id in values:
+        _check_config_option_id(config_id)
+    return values
+
+
+ACPConfigOptionValues = Annotated[
+    dict[str, str | bool], AfterValidator(_check_config_option_ids)
+]
+
+
+async def _apply_config_options(
+    conn: ClientSideConnection,
+    session_id: str,
+    values: Mapping[str, str | bool],
+    *,
+    on_config_options: Callable[[str, Sequence[Any]], None],
+    mask: Callable[[Any], Any],
+) -> None:
+    """Set each value in order, recording every response: one may change others.
+
+    Raises:
+        ACPConfigOptionRejectedError: The server refused a value (any
+            ACPRequestError except -32603).
+        ACPRequestError: The server's internal error (-32603), unchanged.
+    """
+    for config_id, value in values.items():
+        try:
+            response = await conn.set_config_option(
+                config_id=config_id, session_id=session_id, value=value
+            )
+        except ACPRequestError as e:
+            if e.code in _RETRIABLE_SERVER_ERROR_CODES:
+                raise
+            raise ACPConfigOptionRejectedError(config_id, value, mask(str(e))) from e
+        on_config_options(session_id, _session_config_options(response))
 
 
 def _codex_model_config_options(model: str) -> tuple[tuple[str, str], ...]:
@@ -1220,6 +1287,8 @@ def _classify_acp_init_error(exc: BaseException) -> str:
     ``init_state`` surfaces them itself.  The code tells clients *which* failure
     occurred so they can react (e.g. prompt re-auth vs. report a missing binary):
 
+    - ``ACPConfigOptionRejected``: the server refused a start-time option value
+      (see :attr:`ACPAgent.acp_config_options`).
     - ``ACPAuthRequired``: a credential failure — the explicit ``-32000`` auth code,
       or a ``-32603`` whose message/data reveals an upstream 401/403 (see
       :func:`_acp_error_indicates_auth`).  The most actionable cloud failure.
@@ -1233,6 +1302,8 @@ def _classify_acp_init_error(exc: BaseException) -> str:
       creation (transport drops, unexpected protocol errors, cwd mismatch
       surfaced by the server).
     """
+    if isinstance(exc, ACPConfigOptionRejectedError):
+        return "ACPConfigOptionRejected"
     if isinstance(exc, ACPFileCredentialSyncError):
         return "ACPInitError"
     if isinstance(exc, ACPFileCredentialNeedsReauthError):
@@ -1867,6 +1938,15 @@ class ACPAgent(AgentBase):
             "Applied via the protocol — set_config_option(model) for "
             "configOptions-based servers (codex, claude), else "
             "set_session_model. If None, the server picks its default."
+        ),
+    )
+    acp_config_options: ACPConfigOptionValues = Field(
+        default_factory=dict,
+        description=(
+            "Session config option values to set with session/set_config_option "
+            "after session/new and before the first prompt, in order. Applied to "
+            "a fresh session only, not after session/load. The model is set with "
+            "acp_model, never here."
         ),
     )
     acp_resume_session_id: str | None = Field(
@@ -3398,6 +3478,15 @@ class ACPAgent(AgentBase):
                 # claude+acp_model the two always agree: the call returns True or
                 # raises before we reach here.)
                 override_applied = applied_via_call
+                # Option values go to a fresh session only: after session/load
+                # the agent has restored its own state.
+                await _apply_config_options(
+                    conn,
+                    session_id,
+                    self.acp_config_options,
+                    on_config_options=client.record_config_options,
+                    mask=client._mask_value,
+                )
             else:
                 # Resumed session. load_session() does not carry model _meta, so
                 # reapply the persisted (possibly runtime-switched) acp_model via
@@ -4665,6 +4754,46 @@ class ACPAgent(AgentBase):
             provider.key if provider else "unknown",
             _fingerprint_session_id(self._session_id),
         )
+
+    def set_acp_config_option(
+        self, config_id: str, value: str | bool
+    ) -> ACPSessionControls:
+        """Set one option on the live session; return the resulting controls.
+
+        Only the session changes; ``acp_config_options`` keeps its values.
+
+        Raises:
+            ValueError: ``config_id`` is empty or ``"model"``.
+            RuntimeError: There is no live session yet.
+            ACPConfigOptionRejectedError: The server refused the value.
+            TimeoutError: No answer within ``ACP_CONFIG_OPTION_TIMEOUT``.
+        """
+        _check_config_option_id(config_id)
+        if not self.has_live_acp_session:
+            raise RuntimeError(
+                "ACP session is not initialized; a config option can only be set "
+                "live after the conversation has started (first run())."
+            )
+        assert self._conn is not None
+        assert self._session_id is not None
+        timeout = _ACP_CONFIG_OPTION_TIMEOUT
+        try:
+            self._executor.run_async(
+                _apply_config_options(
+                    self._conn,
+                    self._session_id,
+                    {config_id: value},
+                    on_config_options=self._client.record_config_options,
+                    mask=self._client._mask_value,
+                ),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            raise TimeoutError(
+                f"ACP server did not answer session/set_config_option for "
+                f"{config_id!r} within {timeout:g}s"
+            ) from None
+        return self.session_controls
 
     def _bind_session_controls(self) -> None:
         """Point the bridge's change callback at this agent's publisher."""
