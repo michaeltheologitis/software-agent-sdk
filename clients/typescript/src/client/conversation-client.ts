@@ -28,6 +28,7 @@ import {
   type ACPSessionControls,
 } from '../models/acp-session-controls';
 import { acpSessionControlsOf } from '../events/types';
+import type { CancelAcpSessionResponse } from '../events/types';
 
 export interface ConversationClientOptions {
   host: string;
@@ -417,6 +418,22 @@ export class ConversationClient {
     const response = await this.client.post<ACPConfigOptionSetResponse>(
       `/api/conversations/${conversationId}/acp/config-options`,
       { config_id: configId, value }
+    );
+    return response.data;
+  }
+
+  /**
+   * Cancel one ACP sub-agent session's current work. 409 when the child did not
+   * advertise `cancel` (or no ACP connection is live); the child's next
+   * `ACPSubagentEvent` (idle, `cancelled`) confirms it.
+   */
+  async cancelAcpSession(
+    conversationId: string,
+    sessionId: string
+  ): Promise<CancelAcpSessionResponse> {
+    const session = encodeURIComponent(sessionId);
+    const response = await this.client.post<CancelAcpSessionResponse>(
+      `/api/conversations/${conversationId}/acp/sessions/${session}/cancel`
     );
     return response.data;
   }
