@@ -635,11 +635,15 @@ def _response_type_widening_report_items(
 # Response properties that are known extensible discriminated-union discriminators
 # and may therefore grow new enum values additively. Adding a HookType value
 # (e.g. "agent") to a hook definition's `type` is safe because hook configs are an
-# extensible union and clients must tolerate unknown discriminator values. This is
-# intentionally scoped to the hook discriminator so an ordinary new response enum
-# value elsewhere (a new status/mode/etc.) is still treated as a breaking change.
+# extensible union and clients must tolerate unknown discriminator values. The
+# platform keys of a Canvas App backend's `artifacts` map are extensible the same
+# way: a manifest names the platforms it ships, and a client reads the ones it
+# knows. This is intentionally scoped to those two properties so an ordinary new
+# response enum value elsewhere (a new status/mode/etc.) is still treated as a
+# breaking change.
 _EXTENSIBLE_DISCRIMINATOR_PROPERTY_RE = re.compile(
     r"HookConfig\b.*\bhooks/items/type\b"
+    r"|CanvasExtensionBackend\b.*\bartifacts/propertyNames\b"
 )
 _ACCEPTED_CLOUD_PROXY_PATH_REMOVAL_ID = "api-path-removed-without-deprecation"
 _ACCEPTED_CLOUD_PROXY_REMOVAL_PATH = "/api/cloud-proxy"

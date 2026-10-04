@@ -849,6 +849,31 @@ def test_split_breaking_changes_separates_three_buckets():
     assert any("`status`" in change["text"] for change in other)
 
 
+def test_backend_artifact_platform_additions_are_downgraded_and_nothing_else():
+    platform_key = (
+        "added the new `darwin-arm64` enum value to the "
+        "`canvas_extensions/items/manifest/anyOf[subschema #1: "
+        "CanvasExtensionManifest]/backend/anyOf[subschema #1: "
+        "CanvasExtensionBackend]/artifacts/propertyNames/` response property for "
+        "the response status `200`"
+    )
+    other_backend_enum = (
+        "added the new `2` enum value to the "
+        "`manifest/anyOf[subschema #1: CanvasExtensionManifest]/backend/anyOf["
+        "subschema #1: CanvasExtensionBackend]/schema_version` response property "
+        "for the response status `200`"
+    )
+    changes = [
+        {"id": "response-property-enum-value-added", "details": {}, "text": text}
+        for text in (platform_key, other_backend_enum)
+    ]
+
+    _, _, additive, other = _prod._split_breaking_changes(changes)
+
+    assert [change["text"] for change in additive] == [platform_key]
+    assert [change["text"] for change in other] == [other_backend_enum]
+
+
 def test_parse_response_property_type_widening_requires_response_property():
     change = {
         "id": "response-property-type-changed",
