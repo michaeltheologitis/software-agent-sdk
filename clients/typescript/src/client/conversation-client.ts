@@ -21,6 +21,13 @@ import type {
   UpdateSecretsRequest,
 } from '../models/conversation';
 import type { ConfirmationPolicyBase } from '../types/base';
+import {
+  ACP_SESSION_CONTROLS_EVENT_KIND,
+  type ACPConfigOptionSetResponse,
+  type ACPConfigOptionValues,
+  type ACPSessionControls,
+} from '../models/acp-session-controls';
+import { acpSessionControlsOf } from '../events/types';
 
 export interface ConversationClientOptions {
   host: string;
@@ -43,6 +50,8 @@ export interface CreateConversationPayload {
   agent_profile_id?: string;
   agent?: unknown;
   agent_settings?: unknown;
+  /** ACP session config option values applied after session/new, before the first prompt. */
+  acp_config_options?: ACPConfigOptionValues;
   [key: string]: unknown;
 }
 
@@ -384,6 +393,42 @@ export class ConversationClient {
     await this.client.post<Success>(`/api/conversations/${conversationId}/switch_acp_model`, {
       model,
     });
+  }
+
+  /**
+   * What an ACP agent would offer before any conversation exists. Send the
+   * payload a start would send (with any `acp_config_options`); the agent is
+   * started once in a throwaway session and stopped again.
+   */
+  async previewAcpSession(payload: CreateConversationPayload): Promise<ACPSessionControls> {
+    const response = await this.client.post<ACPSessionControls>('/api/acp/preview', payload);
+    return response.data;
+  }
+
+  /**
+   * Set an ACP session config option: live (`applied: true`, with the agent's
+   * new controls) or, before the session starts, kept for it (`applied: false`).
+   */
+  async setAcpConfigOption(
+    conversationId: string,
+    configId: string,
+    value: string | boolean
+  ): Promise<ACPConfigOptionSetResponse> {
+    const response = await this.client.post<ACPConfigOptionSetResponse>(
+      `/api/conversations/${conversationId}/acp/config-options`,
+      { config_id: configId, value }
+    );
+    return response.data;
+  }
+
+  /** The newest ACPSessionControlsEvent's lists, or empty lists. */
+  async getAcpSessionControls(conversationId: string): Promise<ACPSessionControls> {
+    const page = await this.searchEvents(conversationId, {
+      kind: ACP_SESSION_CONTROLS_EVENT_KIND,
+      sort_order: 'TIMESTAMP_DESC',
+      limit: 1,
+    });
+    return acpSessionControlsOf(page.items);
   }
 
   async deleteConversation(conversationId: string): Promise<void> {

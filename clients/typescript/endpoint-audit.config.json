@@ -35,6 +35,11 @@
       "reason": "Client-ahead API stacked on the pending Agent Server pre-flight LLM validation endpoint.",
       "owner": "OpenHands TypeScript client maintainers",
       "tracking": "https://github.com/OpenHands/software-agent-sdk/pull/4422"
+    },
+    {
+      "endpoints": ["POST /api/acp/preview", "POST /api/conversations/{}/acp/config-options"],
+      "reason": "Client-ahead until the pinned Agent Server release carries the ACP session-controls routes.",
+      "owner": "OpenHands TypeScript client maintainers"
     }
   ],
 
