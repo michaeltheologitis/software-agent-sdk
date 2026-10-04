@@ -26,8 +26,10 @@ from pydantic import SecretStr
 
 from openhands.agent_server.__main__ import preload_modules
 from openhands.sdk import LLM, Agent, AgentContext, Conversation, Message, TextContent
+from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation import RemoteConversation
 from openhands.sdk.event import (
+    ACPSubagentEvent,
     ActionEvent,
     AgentErrorEvent,
     CondensationSummaryEvent,
@@ -52,6 +54,7 @@ from openhands.sdk.subagent.registry import (
 )
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.workspace.docker.workspace import find_available_tcp_port
+from tests.conftest import scripted_acp_command
 
 
 @contextmanager
@@ -2668,10 +2671,6 @@ def test_interrupt_endpoint_cancels_running_conversation(
 def test_acp_subagent_sessions_over_live_server(server_env, acp_request_log):
     """A sub-agent run through a real server: the tree reaches REST and the
     WebSocket alike, and the cancel route stops one child end to end."""
-    from openhands.sdk.agent import ACPAgent
-    from openhands.sdk.event import ACPSubagentEvent
-    from tests.conftest import scripted_acp_command
-
     agent = ACPAgent(
         acp_command=scripted_acp_command("--subagents", "--cancel-wait", "30"),
         acp_subagents=True,
