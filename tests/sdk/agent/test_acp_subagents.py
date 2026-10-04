@@ -51,6 +51,19 @@ from openhands.sdk.event import (
 )
 from openhands.sdk.tool.builtins.finish import FinishAction
 from tests.conftest import scripted_acp_command
+from tests.fixtures.acp.scripted_agent import (
+    announce,
+    idle,
+    message,
+    message_chunk,
+    said,
+    subagent,
+    text,
+    thought,
+    tool_call,
+    tool_done,
+    usage,
+)
 
 
 ROOT = "root"
@@ -59,92 +72,6 @@ UNSTABLE_MODELS: dict[str, Any] = {
     "session_message": SessionMessage,
     "session_message_chunk": SessionMessageChunk,
 }
-
-
-# -- Wire updates, as an ACP agent sends them ------------------------------------
-
-
-def text(value: str) -> dict[str, Any]:
-    return {"type": "text", "text": value}
-
-
-def subagent(child: str, **fields: Any) -> dict[str, Any]:
-    return {"sessionUpdate": "subagent_update", "sessionId": child, **fields}
-
-
-def announce(
-    child: str, *, cell: str | None = "cell-1", cancel: bool = True, **fields: Any
-) -> dict[str, Any]:
-    update = subagent(child, state={"state": "running"}, **fields)
-    if cell is not None:
-        update["_meta"] = {"openhands": {"parentToolCallId": cell}}
-    if cancel:
-        update["capabilities"] = {"cancel": {}}
-    return update
-
-
-def idle(child: str, stop_reason: str = "end_turn") -> dict[str, Any]:
-    return subagent(child, state={"state": "idle", "stopReason": stop_reason})
-
-
-def tool_call(call_id: str, **fields: Any) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "tool_call",
-        "toolCallId": call_id,
-        "title": f"Run {call_id}",
-        "kind": "execute",
-        "status": "in_progress",
-        **fields,
-    }
-
-
-def tool_done(call_id: str, status: str = "completed", **fields: Any) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": call_id,
-        "status": status,
-        **fields,
-    }
-
-
-def thought(value: str) -> dict[str, Any]:
-    return {"sessionUpdate": "agent_thought_chunk", "content": text(value)}
-
-
-def said(value: str) -> dict[str, Any]:
-    return {"sessionUpdate": "agent_message_chunk", "content": text(value)}
-
-
-def usage(cost: float | None = None, size: int = 1000) -> dict[str, Any]:
-    update: dict[str, Any] = {"sessionUpdate": "usage_update", "used": 1, "size": size}
-    if cost is not None:
-        update["cost"] = {"amount": cost, "currency": "USD"}
-    return update
-
-
-def message(
-    message_id: str, sender: str, recipient: str, value: str, **fields: Any
-) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "session_message",
-        "messageId": message_id,
-        "senderSessionId": sender,
-        "recipientSessionId": recipient,
-        "content": [text(value)],
-        **fields,
-    }
-
-
-def message_chunk(
-    message_id: str, sender: str, recipient: str, value: str
-) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "session_message_chunk",
-        "messageId": message_id,
-        "senderSessionId": sender,
-        "recipientSessionId": recipient,
-        "content": text(value),
-    }
 
 
 # -- The bridge, fed directly ------------------------------------------------------

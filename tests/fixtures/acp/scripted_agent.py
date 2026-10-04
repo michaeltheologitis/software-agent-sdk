@@ -299,72 +299,89 @@ def advertises_subagents(initialize_params: dict[str, Any]) -> bool:
     return "subagents" in (initialize_params.get("clientCapabilities") or {})
 
 
-def _text(text: str) -> dict[str, Any]:
-    return {"type": "text", "text": text}
+# -- Wire updates, as an ACP agent sends them ----------------------------------
 
 
-def _tool_call(call_id: str, title: str) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "tool_call",
-        "toolCallId": call_id,
-        "title": title,
-        "kind": "execute",
-        "status": "in_progress",
-    }
+def text(value: str) -> dict[str, Any]:
+    return {"type": "text", "text": value}
 
 
-def _tool_call_done(call_id: str, status: str, output: str) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": call_id,
-        "status": status,
-        "rawOutput": output,
-    }
+def subagent(child: str, **fields: Any) -> dict[str, Any]:
+    return {"sessionUpdate": "subagent_update", "sessionId": child, **fields}
 
 
-def _announce(child: str, title: str, cell: str, *, cancel: bool) -> dict[str, Any]:
-    update: dict[str, Any] = {
-        "sessionUpdate": "subagent_update",
-        "sessionId": child,
-        "title": title,
-        "state": {"state": "running"},
-        "_meta": {"openhands": {"parentToolCallId": cell}},
-    }
+def announce(
+    child: str, *, cell: str | None = ROOT_CELL, cancel: bool = True, **fields: Any
+) -> dict[str, Any]:
+    update = subagent(child, state={"state": "running"}, **fields)
+    if cell is not None:
+        update["_meta"] = {"openhands": {"parentToolCallId": cell}}
     if cancel:
         update["capabilities"] = {"cancel": {}}
     return update
 
 
-def _idle(child: str, stop_reason: str) -> dict[str, Any]:
+def idle(child: str, stop_reason: str = "end_turn") -> dict[str, Any]:
+    return subagent(child, state={"state": "idle", "stopReason": stop_reason})
+
+
+def tool_call(call_id: str, **fields: Any) -> dict[str, Any]:
     return {
-        "sessionUpdate": "subagent_update",
-        "sessionId": child,
-        "state": {"state": "idle", "stopReason": stop_reason},
+        "sessionUpdate": "tool_call",
+        "toolCallId": call_id,
+        "title": f"Run {call_id}",
+        "kind": "execute",
+        "status": "in_progress",
+        **fields,
     }
 
 
-def _message(
-    kind: str, message_id: str, sender: str, recipient: str, content: Any
+def tool_done(call_id: str, status: str = "completed", **fields: Any) -> dict[str, Any]:
+    return {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": call_id,
+        "status": status,
+        **fields,
+    }
+
+
+def thought(value: str) -> dict[str, Any]:
+    return {"sessionUpdate": "agent_thought_chunk", "content": text(value)}
+
+
+def said(value: str) -> dict[str, Any]:
+    return {"sessionUpdate": "agent_message_chunk", "content": text(value)}
+
+
+def usage(cost: float | None = None, size: int = CONTEXT_WINDOW) -> dict[str, Any]:
+    update: dict[str, Any] = {"sessionUpdate": "usage_update", "used": 10, "size": size}
+    if cost is not None:
+        update["cost"] = {"amount": cost, "currency": "USD"}
+    return update
+
+
+def message(
+    message_id: str, sender: str, recipient: str, value: str, **fields: Any
 ) -> dict[str, Any]:
     return {
-        "sessionUpdate": kind,
+        "sessionUpdate": "session_message",
         "messageId": message_id,
         "senderSessionId": sender,
         "recipientSessionId": recipient,
-        "content": content,
+        "content": [text(value)],
+        **fields,
     }
 
 
-def _thought(text: str) -> dict[str, Any]:
-    return {"sessionUpdate": "agent_thought_chunk", "content": _text(text)}
-
-
-def _usage(cost: float) -> dict[str, Any]:
+def message_chunk(
+    message_id: str, sender: str, recipient: str, value: str
+) -> dict[str, Any]:
     return {
-        "sessionUpdate": "usage_update",
-        "used": 10,
-        "size": CONTEXT_WINDOW,
-        "cost": {"amount": cost, "currency": "USD"},
+        "sessionUpdate": "session_message_chunk",
+        "messageId": message_id,
+        "senderSessionId": sender,
+        "recipientSessionId": recipient,
+        "content": text(value),
     }
 
 
@@ -385,72 +402,43 @@ async def play_subagent_run(
         )
 
     root = root_session_id
-    await send(root, _tool_call(ROOT_CELL, "Run spawn"))
+    await send(root, tool_call(ROOT_CELL, title="Run spawn"))
     if advertised:
-        await send(root, _announce(CHILD_A, "Summarize part A", ROOT_CELL, cancel=True))
-        await send(
-            root,
-            _message(
-                "session_message",
-                "child-a-task",
-                root,
-                CHILD_A,
-                [_text("Summarize part A.")],
-            ),
-        )
-        await send(CHILD_A, _thought("Reading "))
-        await send(CHILD_A, _thought("part A."))
-        await send(CHILD_A, _tool_call("cell-a1", "Run delegate"))
-        await send(
-            CHILD_A, _announce(GRANDCHILD, "Check part A", "cell-a1", cancel=True)
-        )
+        await send(root, announce(CHILD_A, title="Summarize part A"))
+        await send(root, message("child-a-task", root, CHILD_A, "Summarize part A."))
+        await send(CHILD_A, thought("Reading "))
+        await send(CHILD_A, thought("part A."))
+        await send(CHILD_A, tool_call("cell-a1", title="Run delegate"))
+        await send(CHILD_A, announce(GRANDCHILD, cell="cell-a1", title="Check part A"))
         for part in ("Part A ", "checks out."):
             await send(
-                GRANDCHILD,
-                _message(
-                    "session_message_chunk",
-                    "child-a-1-answer",
-                    GRANDCHILD,
-                    CHILD_A,
-                    _text(part),
-                ),
+                GRANDCHILD, message_chunk("child-a-1-answer", GRANDCHILD, CHILD_A, part)
             )
-        await send(CHILD_A, _idle(GRANDCHILD, "end_turn"))
-        await send(CHILD_A, _tool_call_done("cell-a1", "completed", "checked"))
-        await send(CHILD_A, _usage(CHILD_COST))
-        await send(
-            CHILD_A,
-            _message(
-                "session_message",
-                "child-a-answer",
-                CHILD_A,
-                root,
-                [_text("Part A: fine.")],
-            ),
-        )
-        await send(root, _idle(CHILD_A, "end_turn"))
+        await send(CHILD_A, idle(GRANDCHILD))
+        await send(CHILD_A, tool_done("cell-a1", rawOutput="checked"))
+        await send(CHILD_A, usage(CHILD_COST))
+        await send(CHILD_A, message("child-a-answer", CHILD_A, root, "Part A: fine."))
+        await send(root, idle(CHILD_A))
 
-        await send(
-            root, _announce(CHILD_C, "Summarize part C", ROOT_CELL, cancel=False)
-        )
-        await send(CHILD_C, _tool_call("cell-c1", "Run count"))
-        await send(CHILD_C, _tool_call_done("cell-c1", "completed", "3"))
-        await send(root, _idle(CHILD_C, "end_turn"))
+        await send(root, announce(CHILD_C, cancel=False, title="Summarize part C"))
+        await send(CHILD_C, tool_call("cell-c1", title="Run count"))
+        await send(CHILD_C, tool_done("cell-c1", rawOutput="3"))
+        await send(root, idle(CHILD_C))
 
-        await send(root, _announce(CHILD_B, "Summarize part B", ROOT_CELL, cancel=True))
-        await send(CHILD_B, _tool_call("cell-b1", "Run slow"))
+        await send(root, announce(CHILD_B, title="Summarize part B"))
+        await send(CHILD_B, tool_call("cell-b1", title="Run slow"))
         if cancel_wait_s > 0:
             try:
                 await asyncio.wait_for(cancelled.wait(), timeout=cancel_wait_s)
             except TimeoutError:
                 pass
         if cancelled.is_set():
-            await send(CHILD_B, _tool_call_done("cell-b1", "failed", "cancelled"))
-            await send(root, _idle(CHILD_B, "cancelled"))
+            await send(CHILD_B, tool_done("cell-b1", "failed", rawOutput="cancelled"))
+            await send(root, idle(CHILD_B, "cancelled"))
         else:
-            await send(CHILD_B, _tool_call_done("cell-b1", "completed", "done"))
-            await send(root, _idle(CHILD_B, "end_turn"))
-    await send(root, _tool_call_done(ROOT_CELL, "completed", "spawned"))
+            await send(CHILD_B, tool_done("cell-b1", rawOutput="done"))
+            await send(root, idle(CHILD_B))
+    await send(root, tool_done(ROOT_CELL, rawOutput="spawned"))
 
 
 @dataclass(frozen=True)

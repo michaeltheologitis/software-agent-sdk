@@ -30,6 +30,7 @@ from openhands.sdk.agent.acp_unstable import (
     SubagentUpdate,
     UnstableSessionUpdate,
 )
+from tests.fixtures.acp.scripted_agent import message, said, subagent
 
 
 LIBRARY_CAUGHT_UP = (
@@ -38,27 +39,6 @@ LIBRARY_CAUGHT_UP = (
     "re-run the ACP conformance probes against Claude Code, Codex and Gemini, and "
     "bump agent-client-protocol in openhands-sdk/pyproject.toml."
 )
-
-
-def subagent_update(child: str, **fields: Any) -> dict[str, Any]:
-    return {"sessionUpdate": "subagent_update", "sessionId": child, **fields}
-
-
-def session_message(message_id: str, text: str) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "session_message",
-        "messageId": message_id,
-        "senderSessionId": "root",
-        "recipientSessionId": "child",
-        "content": [{"type": "text", "text": text}],
-    }
-
-
-def message_chunk(text: str) -> dict[str, Any]:
-    return {
-        "sessionUpdate": "agent_message_chunk",
-        "content": {"type": "text", "text": text},
-    }
 
 
 class Recorder:
@@ -134,7 +114,7 @@ async def settle(recorder: Recorder, count: int) -> None:
 def test_acp_library_rejects_subagent_update():
     notification = {
         "sessionId": "root",
-        "update": subagent_update("child", state={"state": "running"}),
+        "update": subagent("child", state={"state": "running"}),
     }
 
     with pytest.raises(ValidationError):
@@ -165,15 +145,15 @@ async def test_initialize_puts_subagents_capability_on_the_wire():
 
 async def test_unstable_updates_reach_the_callback_in_wire_order():
     sent = [
-        ("root", message_chunk("a")),
-        ("root", subagent_update("child", title="Child")),
-        ("root", session_message("m1", "task")),
-        ("child", message_chunk("b")),
-        ("root", subagent_update("child", state={"state": "running"})),
-        ("child", message_chunk("c")),
-        ("child", session_message("m2", "answer")),
-        ("root", message_chunk("d")),
-        ("root", subagent_update("child", state={"state": "idle"})),
+        ("root", said("a")),
+        ("root", subagent("child", title="Child")),
+        ("root", message("m1", "root", "child", "task")),
+        ("child", said("b")),
+        ("root", subagent("child", state={"state": "running"})),
+        ("child", said("c")),
+        ("child", message("m2", "root", "child", "answer")),
+        ("root", said("d")),
+        ("root", subagent("child", state={"state": "idle"})),
     ]
     recorder = Recorder()
     async with wired(recorder) as wire:
@@ -189,7 +169,7 @@ async def test_unstable_updates_reach_the_callback_in_wire_order():
 async def test_stable_updates_still_reach_the_library_router():
     recorder = Recorder()
     async with wired(recorder) as wire:
-        await wire.send("child", message_chunk("hello"))
+        await wire.send("child", said("hello"))
         await settle(recorder, 1)
 
     [(session_id, update)] = recorder.received
@@ -204,7 +184,7 @@ async def test_malformed_unstable_update_is_dropped_with_a_warning(caplog):
     with caplog.at_level(logging.WARNING):
         async with wired(recorder) as wire:
             await wire.send("root", malformed)
-            await wire.send("root", message_chunk("after"))
+            await wire.send("root", said("after"))
             await settle(recorder, 1)
 
     assert [type(update) for _, update in recorder.received] == [AgentMessageChunk]
@@ -214,17 +194,17 @@ async def test_malformed_unstable_update_is_dropped_with_a_warning(caplog):
 
 
 def test_patch_fields_tell_omitted_from_null():
-    cleared = SubagentUpdate.model_validate(subagent_update("child", title=None))
-    omitted = SubagentUpdate.model_validate(subagent_update("child"))
+    cleared = SubagentUpdate.model_validate(subagent("child", title=None))
+    omitted = SubagentUpdate.model_validate(subagent("child"))
 
     assert "title" in cleared.model_fields_set
     assert "title" not in omitted.model_fields_set
 
 
 def test_message_content_keeps_non_text_blocks_typed():
-    message = SessionMessage.model_validate(
+    parsed = SessionMessage.model_validate(
         {
-            **session_message("m1", "see"),
+            **message("m1", "root", "child", "see"),
             "content": [
                 {"type": "text", "text": "see"},
                 {"type": "image", "data": "AAAA", "mimeType": "image/png"},
@@ -232,5 +212,5 @@ def test_message_content_keeps_non_text_blocks_typed():
         }
     )
 
-    assert message.content is not None
-    assert [block.type for block in message.content] == ["text", "image"]
+    assert parsed.content is not None
+    assert [block.type for block in parsed.content] == ["text", "image"]
