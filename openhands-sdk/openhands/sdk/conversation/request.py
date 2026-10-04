@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-from openhands.sdk.agent.acp_agent import ACPAgent as ACPAgent
+from openhands.sdk.agent.acp_agent import ACPAgent as ACPAgent, ACPConfigOptionValues
 from openhands.sdk.agent.agent import Agent as Agent
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.types import (
@@ -315,6 +315,14 @@ class StartConversationRequest(ConversationConfig):
         ),
     )
     agent: AgentBase = Field(default=cast(AgentBase, None))
+    acp_config_options: ACPConfigOptionValues = Field(
+        default_factory=dict,
+        description=(
+            "ACP session config option values to apply after session/new and "
+            "before the first prompt, in order. Requires an ACP agent. Launch-only: "
+            "folded into the agent, not stored with the conversation record."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
