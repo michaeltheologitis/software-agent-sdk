@@ -2040,6 +2040,15 @@ class EventService:
             None, self._conversation.set_acp_config_option, config_id, value
         )
 
+    async def cancel_acp_session(self, session_id: str) -> None:
+        """Run ``LocalConversation.cancel_acp_session`` off the server's loop."""
+        if self._conversation is None:
+            raise ValueError("inactive_service")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, self._conversation.cancel_acp_session, session_id
+        )
+
     async def close(self):
         if self.bash_event_service is not None:
             await self.bash_event_service.close()

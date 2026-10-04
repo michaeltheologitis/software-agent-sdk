@@ -1,4 +1,5 @@
-"""The ACP routes: previewing an agent's session controls and setting options.
+"""The ACP routes: previewing an agent's session controls, setting options, and
+cancelling one sub-agent session.
 
 The ACP agent behind them is the scripted test agent, run as a real process.
 """
@@ -34,6 +35,7 @@ from openhands.agent_server.server_details_router import build_server_info
 from openhands.sdk import LLM, Agent
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.agent.acp_models import ACPConfigOption
+from openhands.sdk.agent.acp_unstable import SubagentClientSideConnection
 from openhands.sdk.profiles.agent_profile import ACPAgentProfile
 from tests.conftest import SCRIPTED_ACP_AGENT, scripted_acp_command
 
@@ -103,6 +105,11 @@ class Server:
         return await self.client.post(
             f"/api/conversations/{conversation_id}/acp/config-options",
             json={"config_id": config_id, "value": value},
+        )
+
+    async def cancel(self, conversation_id: UUID, session_id: str) -> httpx.Response:
+        return await self.client.post(
+            f"/api/conversations/{conversation_id}/acp/sessions/{session_id}/cancel"
         )
 
     async def events(self, conversation_id: UUID) -> list[dict[str, Any]]:
@@ -501,6 +508,9 @@ def test_server_info_announces_acp_session_controls():
     assert "acp_session_controls_v1" in build_server_info().capabilities
 
 
+# -- Cancelling one sub-agent session -----------------------------------------------
+
+
 def subagent_agent(*flags: str) -> dict[str, Any]:
     return scripted_agent("--subagents", *flags, acp_subagents=True)
 
@@ -518,6 +528,57 @@ async def stored_snapshot(
             if snapshots and snapshots[-1].get("state") == state:
                 return snapshots[-1]
             await asyncio.sleep(0.05)
+
+
+async def test_a_cancel_for_an_unknown_conversation_is_not_found(server):
+    response = await server.cancel(uuid4(), "child-b")
+
+    assert response.status_code == 404
+
+
+async def test_a_cancel_for_an_unknown_session_is_not_found(server):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+
+    response = await server.cancel(conversation_id, "no-such-child")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == (
+        "ACP session no-such-child is not a sub-agent session of this conversation."
+    )
+
+
+async def test_a_cancel_for_a_child_without_a_grant_is_a_conflict(server):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+
+    response = await server.cancel(conversation_id, "child-c")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "ACP session child-c does not accept cancel; cancel the conversation's "
+        "turn instead."
+    )
+
+
+async def test_a_cancel_on_a_conversation_that_is_not_acp_is_a_bad_request(server):
+    conversation_id = await server.start(agent=plain_agent())
+
+    response = await server.cancel(conversation_id, "child-b")
+
+    assert response.status_code == 400
+
+
+async def test_a_cancel_the_agent_does_not_take_in_time_times_out(server, monkeypatch):
+    conversation_id = await server.start_and_run(agent=subagent_agent())
+
+    async def never_written(self, session_id: str, **kwargs: Any) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(SubagentClientSideConnection, "cancel", never_written)
+    monkeypatch.setattr(acp_agent_module, "_ACP_SUBAGENT_CANCEL_TIMEOUT", 0.2)
+
+    response = await server.cancel(conversation_id, "child-b")
+
+    assert response.status_code == 504
 
 
 async def test_stored_sub_agent_events_validate_against_the_event_schema(server):

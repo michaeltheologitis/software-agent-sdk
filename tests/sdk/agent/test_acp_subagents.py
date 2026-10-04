@@ -10,6 +10,8 @@ scripted ACP agent in ``tests/fixtures/acp/scripted_agent.py``: its
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from functools import partial
@@ -25,13 +27,17 @@ from openhands.sdk.agent.acp_agent import (
     _fingerprint_session_id,
     _OpenHandsACPBridge,
 )
-from openhands.sdk.agent.acp_subagents import ACPSessionNotCancellableError
+from openhands.sdk.agent.acp_subagents import (
+    ACPSessionNotCancellableError,
+    ACPSessionNotFoundError,
+)
 from openhands.sdk.agent.acp_unstable import (
     SessionMessage,
     SessionMessageChunk,
     SubagentUpdate,
 )
 from openhands.sdk.conversation import LocalConversation
+from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import (
     ACPSessionMessageEvent,
     ACPSessionTextEvent,
@@ -721,6 +727,95 @@ def test_subagents_off_stores_only_root_work_through_the_stock_connection(
     assert all("acp_session_id" not in e.model_dump(exclude_none=True) for e in calls)
     new_kinds = (ACPSubagentEvent, ACPSessionMessageEvent, ACPSessionTextEvent)
     assert not [e for e in events if isinstance(e, new_kinds)]
+
+
+def cancel_once_announced(conv: LocalConversation, child: str) -> bool:
+    """Retry until the child is known on the live connection; return whether
+    another thread held the conversation's state lock when the call that
+    succeeded began."""
+    deadline = time.monotonic() + 15
+    while True:
+        lock_held_elsewhere = conv.state._lock.locked() and not (
+            conv.state._lock.owned()
+        )
+        try:
+            conv.cancel_acp_session(child)
+            return lock_held_elsewhere
+        except (ACPSessionNotFoundError, ACPSessionNotCancellableError):
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
+def run_in_thread(conv: LocalConversation) -> threading.Thread:
+    conv.send_message("hello")
+    runner = threading.Thread(target=conv.run, daemon=True)
+    runner.start()
+    return runner
+
+
+def test_cancel_acp_session_reaches_the_child_without_waiting_for_the_state_lock(
+    conversation, acp_request_log
+):
+    conv = conversation("--subagents", "--cancel-wait", "30")
+    runner = run_in_thread(conv)
+
+    lock_held_by_the_run = cancel_once_announced(conv, "child-b")
+    runner.join(timeout=30)
+
+    assert lock_held_by_the_run
+    assert conv.state.execution_status == ConversationExecutionStatus.FINISHED
+    assert {"method": "session/cancel", "params": {"sessionId": "child-b"}} in (
+        acp_request_log()
+    )
+    snapshot = wait_until(lambda: turned_idle(conv, "child-b"))
+    assert snapshot.stop_reason == "cancelled"
+    tree = tree_from(list(conv.state.events))
+    assert tree["child-b"]["tool_calls"] == {"cell-b1": "failed"}
+
+
+def test_cancel_acp_session_for_an_idle_child_that_keeps_its_grant_is_sent(
+    conversation, acp_request_log
+):
+    conv = conversation("--subagents")
+    run(conv)
+    idle_with_grant = wait_until(lambda: turned_idle(conv, "child-b"))
+    assert idle_with_grant.cancellable
+
+    conv.cancel_acp_session("child-b")
+
+    cancel = {"method": "session/cancel", "params": {"sessionId": "child-b"}}
+    wait_until(lambda: cancel in acp_request_log())
+    assert subagent_snapshots(conv.state.events)["child-b"] == idle_with_grant
+
+
+def test_cancel_acp_session_refuses_a_child_without_a_grant(
+    conversation, acp_request_log
+):
+    conv = conversation("--subagents")
+    run(conv)
+
+    with pytest.raises(ACPSessionNotCancellableError):
+        conv.cancel_acp_session("child-c")
+
+    assert "session/cancel" not in [e["method"] for e in acp_request_log()]
+
+
+def test_cancel_acp_session_refuses_unknown_and_root_sessions(conversation):
+    conv = conversation("--subagents")
+    run(conv)
+
+    with pytest.raises(ACPSessionNotFoundError):
+        conv.cancel_acp_session("no-such-child")
+    with pytest.raises(ACPSessionNotCancellableError):
+        conv.cancel_acp_session(root_id(conv))
+
+
+def test_cancel_acp_session_without_a_live_connection_is_refused(conversation):
+    conv = conversation("--subagents")
+
+    with pytest.raises(ACPSessionNotCancellableError):
+        conv.cancel_acp_session("child-b")
 
 
 # -- Ordering, as the persisted contract states it ------------------------------------
