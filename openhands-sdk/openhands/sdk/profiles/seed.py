@@ -55,6 +55,7 @@ def build_seed_profile(
                 else None
             ),
             acp_args=list(agent_settings.acp_args) or None,
+            acp_subagents=agent_settings.acp_subagents,
             mcp_server_refs=None,
             # ACP profiles carry no skill field — the subprocess owns its context.
         )

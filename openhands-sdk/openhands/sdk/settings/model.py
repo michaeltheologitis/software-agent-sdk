@@ -1748,6 +1748,14 @@ class ACPAgentSettings(AgentSettingsBase):
             "conversations share one sandbox (see #1019)."
         ),
     )
+    acp_subagents: bool = Field(
+        default=False,
+        description=(
+            "Advertise ACP's unstable sub-agent sessions to the ACP server and "
+            "persist the child sessions it exposes. Forwarded to "
+            ":attr:`~openhands.sdk.agent.ACPAgent.acp_subagents`; off by default."
+        ),
+    )
     # Programmatic / downstream-facing knob, deliberately NOT surfaced in the
     # settings-form UI (no SETTINGS_METADATA_KEY): it's a list of structured
     # specs a downstream application supplies in code to support other ACP CLIs,
@@ -1953,6 +1961,7 @@ class ACPAgentSettings(AgentSettingsBase):
             acp_prompt_timeout=self.acp_prompt_timeout,
             acp_startup_timeout=self.acp_startup_timeout,
             acp_isolate_data_dir=self.acp_isolate_data_dir,
+            acp_subagents=self.acp_subagents,
             acp_file_secrets=list(self.acp_file_secrets),
             agent_context=self.agent_context,
             mcp_config=self.mcp_config,

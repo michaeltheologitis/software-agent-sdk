@@ -1,0 +1,15 @@
+{
+  "__expected__": {
+    "name": "subagents",
+    "agent_kind": "acp",
+    "acp_server": "custom",
+    "acp_subagents": true
+  },
+  "schema_version": 2,
+  "name": "subagents",
+  "revision": 0,
+  "agent_kind": "acp",
+  "acp_server": "custom",
+  "acp_command": "my-acp-agent",
+  "acp_subagents": true
+}

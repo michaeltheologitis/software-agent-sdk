@@ -289,6 +289,14 @@ class ACPAgentProfile(AgentProfileBase):
         default=None,
         description="Additional arguments appended to the ACP server command.",
     )
+    acp_subagents: bool = Field(
+        default=False,
+        description=(
+            "Advertise ACP's unstable sub-agent sessions to the ACP server and "
+            "persist the child sessions it exposes. Forwarded to "
+            ":attr:`~openhands.sdk.settings.ACPAgentSettings.acp_subagents`."
+        ),
+    )
 
 
 class LaunchedAgentProfile(BaseModel):

@@ -302,6 +302,7 @@ def _build_acp_settings(
         "acp_startup_timeout": profile.acp_startup_timeout,
         "acp_command": command,
         "acp_args": list(profile.acp_args) if profile.acp_args else [],
+        "acp_subagents": profile.acp_subagents,
         "mcp_config": mcp_config,
         "agent_context": agent_context,
     }
