@@ -31,6 +31,9 @@ from openhands.sdk.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Each stored snapshot is a new event: its own id and time, and no parent yet.
+_PER_EVENT_FIELDS = {"id", "timestamp", "parent_id"}
+
 
 class ACPSessionNotFoundError(LookupError):
     """No sub-agent session with this id is known on the ACP connection."""
@@ -39,20 +42,6 @@ class ACPSessionNotFoundError(LookupError):
 class ACPSessionNotCancellableError(RuntimeError):
     """The session cannot be cancelled now: no live connection, the root session,
     or no current ``cancel`` grant from the agent."""
-
-
-@dataclass
-class _Association:
-    parent_session_id: str | None
-    parent_tool_call_id: str | None = None
-    title: str | None = None
-    description: str | None = None
-    state: str | None = None
-    stop_reason: str | None = None
-    cancel_granted: bool = False
-    cost: float | None = None
-    cost_currency: str | None = None
-    meta: dict[str, Any] | None = None
 
 
 @dataclass
@@ -71,7 +60,11 @@ class _Message:
 
 
 class ACPSubagentSessions:
-    """Routing, merge, segments, cost and cancel grants for one ACP connection."""
+    """Routing, merge, segments, cost and cancel grants for one ACP connection.
+
+    A child's association is held as its latest ``ACPSubagentEvent``, whose
+    ``cancellable`` is the live grant; each snapshot stored is a new event.
+    """
 
     root_session_id: str | None
     replaying: bool
@@ -80,27 +73,19 @@ class ACPSubagentSessions:
         self._mask = mask
         self.root_session_id = None
         self.replaying = False
-        self._children: dict[str, _Association] = {}
+        self._children: dict[str, ACPSubagentEvent] = {}
         self._pending: dict[str, _Pending] = {}
         self._messages: dict[tuple[str, str], _Message] = {}
 
     def seed(self, events: Iterable[Event]) -> list[ACPSubagentEvent]:
         """Register the children stored in ``events``; return the snapshots that
         withdraw their cancel grants and unconfirm their states."""
-        stored: dict[str, ACPSubagentEvent] = {}
-        for event in events:
-            if isinstance(event, ACPSubagentEvent):
-                stored[event.acp_session_id] = event
+        stored = {
+            e.acp_session_id: e for e in events if isinstance(e, ACPSubagentEvent)
+        }
+        unconfirmed = {"state": None, "stop_reason": None, "cancellable": False}
         for child, snapshot in stored.items():
-            self._children[child] = _Association(
-                parent_session_id=snapshot.parent_session_id,
-                parent_tool_call_id=snapshot.parent_tool_call_id,
-                title=snapshot.title,
-                description=snapshot.description,
-                cost=snapshot.cost,
-                cost_currency=snapshot.cost_currency,
-                meta=snapshot.meta,
-            )
+            self._children[child] = snapshot.model_copy(update=unconfirmed)
         return [
             self._snapshot(child, source="environment")
             for child, snapshot in stored.items()
@@ -129,7 +114,9 @@ class ACPSubagentSessions:
         parent = self.key(session_id)
         association = self._children.get(child)
         if association is None:
-            association = self._children[child] = _Association(parent)
+            self._children[child] = ACPSubagentEvent(
+                acp_session_id=child, parent_session_id=parent
+            )
         elif association.parent_session_id != parent:
             logger.warning(
                 "An ACP subagent_update arrived on a session other than its "
@@ -138,7 +125,7 @@ class ACPSubagentSessions:
         if self.replaying:
             return []
         events = self._flush(session_id) + self._flush(child)
-        self._merge(association, update)
+        self._merge(child, update)
         return [*events, self._snapshot(child)]
 
     def on_session_message(
@@ -213,7 +200,9 @@ class ACPSubagentSessions:
         currency = update.cost.currency if update.cost is not None else None
         if (cost, currency) == (association.cost, association.cost_currency):
             return []
-        association.cost, association.cost_currency = cost, currency
+        self._children[session_id] = association.model_copy(
+            update={"cost": cost, "cost_currency": currency}
+        )
         return [self._snapshot(session_id)]
 
     def before_update(self, session_id: str) -> list[Event]:
@@ -234,50 +223,39 @@ class ACPSubagentSessions:
         association = self._children.get(session_id)
         if association is None:
             raise ACPSessionNotFoundError(session_id)
-        if not association.cancel_granted:
+        if not association.cancellable:
             raise ACPSessionNotCancellableError(session_id)
 
-    def _merge(self, association: _Association, update: SubagentUpdate) -> None:
+    def _merge(self, child: str, update: SubagentUpdate) -> None:
         """Apply ACP's patch rules: omitted keeps, null clears, a value replaces."""
         fields = update.model_fields_set
+        changes: dict[str, Any] = {}
         if "title" in fields:
-            association.title = self._mask(update.title)
+            changes["title"] = self._mask(update.title)
         if "description" in fields:
-            association.description = self._mask(update.description)
+            changes["description"] = self._mask(update.description)
         if "state" in fields:
             state = update.state
-            association.state = state.state if state is not None else None
-            association.stop_reason = state.stop_reason if state is not None else None
+            changes["state"] = state.state if state is not None else None
+            changes["stop_reason"] = state.stop_reason if state is not None else None
         if "capabilities" in fields:
             capabilities = update.capabilities
-            association.cancel_granted = (
+            changes["cancellable"] = (
                 capabilities is not None and capabilities.cancel is not None
             )
         if "field_meta" in fields:
             meta = update.field_meta
-            association.meta = self._mask(meta)
+            changes["meta"] = self._mask(meta)
             parent_tool_call_id = _parent_tool_call_id(meta)
             if parent_tool_call_id is not None:
-                association.parent_tool_call_id = parent_tool_call_id
+                changes["parent_tool_call_id"] = parent_tool_call_id
+        self._children[child] = self._children[child].model_copy(update=changes)
 
     def _snapshot(
         self, child: str, *, source: SourceType = "agent"
     ) -> ACPSubagentEvent:
-        association = self._children[child]
-        return ACPSubagentEvent(
-            source=source,
-            acp_session_id=child,
-            parent_session_id=association.parent_session_id,
-            parent_tool_call_id=association.parent_tool_call_id,
-            title=association.title,
-            description=association.description,
-            state=association.state,
-            stop_reason=association.stop_reason,
-            cancellable=association.cancel_granted,
-            cost=association.cost,
-            cost_currency=association.cost_currency,
-            meta=association.meta,
-        )
+        association = self._children[child].model_dump(exclude=_PER_EVENT_FIELDS)
+        return ACPSubagentEvent.model_validate({**association, "source": source})
 
     def _message(
         self,

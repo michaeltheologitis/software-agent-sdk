@@ -578,6 +578,7 @@ async def test_replayed_child_calls_are_never_tracked_nor_failed_later(wire):
 
 def stored_snapshot(child: str, **fields: Any) -> ACPSubagentEvent:
     return ACPSubagentEvent(
+        parent_id=f"event-before-{child}",
         acp_session_id=child,
         title=f"Title of {child}",
         parent_tool_call_id="cell-1",
@@ -604,6 +605,7 @@ async def test_new_connection_withdraws_cancel_and_unconfirms_state(wire):
         assert event.model_dump(exclude={"id", "timestamp"}) == {
             **stored.model_dump(exclude={"id", "timestamp"}),
             "source": "environment",
+            "parent_id": None,
             "state": None,
             "stop_reason": None,
             "cancellable": False,
@@ -625,7 +627,7 @@ async def test_partial_patch_after_reconnect_keeps_the_stored_title(wire):
         "cell-1",
         0.5,
     )
-    assert snapshot.state == "idle"
+    assert (snapshot.state, snapshot.parent_id) == ("idle", None)
 
 
 async def test_unannounced_session_follows_the_root_path_with_one_warning(wire, caplog):
