@@ -24,6 +24,9 @@ Flags:
   (with a grandchild, ``child-a-1``), ``child-c`` (which cannot be cancelled)
   and ``child-b``; only the root's lines are played when the client did not
   advertise ``clientCapabilities.subagents``.
+- ``--cancel-wait SECONDS``: how long ``child-b`` waits for a ``session/cancel``
+  naming it (default 0: it does not wait). Cancelled, its cell fails and it
+  turns idle with ``stopReason: cancelled``; otherwise both complete.
 
 When the ``SCRIPTED_ACP_LOG`` environment variable names a file, every request
 and notification the agent receives is appended to it as one JSON line,
@@ -117,6 +120,7 @@ class ScriptedAgent:
         self._sessions_file: Path | None = args.sessions_file
         self._sessions: dict[str, dict[str, Any]] = self._read_sessions()
         self._background: set[asyncio.Task[None]] = set()
+        self._child_b_cancelled = asyncio.Event()
 
     async def initialize(
         self, protocol_version: int, **kwargs: Any
@@ -190,10 +194,13 @@ class ScriptedAgent:
             )
         if self._args.subagents:
             assert self.conn is not None
+            self._child_b_cancelled.clear()
             await play_subagent_run(
                 self.conn,
                 session_id,
                 advertised=advertises_subagents(self.initialize_params),
+                cancel_wait_s=self._args.cancel_wait,
+                cancelled=self._child_b_cancelled,
             )
         first_text = next((b.text for b in prompt if b.type == "text"), "")
         await self._update(session_id, update_agent_message_text(first_text))
@@ -215,7 +222,8 @@ class ScriptedAgent:
         return CloseSessionResponse()
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
-        return None
+        if session_id == CHILD_B:
+            self._child_b_cancelled.set()
 
     def _session(self, session_id: str) -> dict[str, Any]:
         if session_id not in self._sessions:
@@ -369,6 +377,8 @@ async def play_subagent_run(
     root_session_id: str,
     *,
     advertised: bool,
+    cancel_wait_s: float,
+    cancelled: asyncio.Event,
 ) -> None:
     """Send the generic sub-agent run as raw session/update notifications; only
     the root's lines when the client did not advertise ``subagents``."""
@@ -404,8 +414,17 @@ async def play_subagent_run(
 
         await send(root, announce(CHILD_B, title="Summarize part B"))
         await send(CHILD_B, tool_call("cell-b1", title="Run slow"))
-        await send(CHILD_B, tool_done("cell-b1", rawOutput="done"))
-        await send(root, idle(CHILD_B))
+        if cancel_wait_s > 0:
+            try:
+                await asyncio.wait_for(cancelled.wait(), timeout=cancel_wait_s)
+            except TimeoutError:
+                pass
+        if cancelled.is_set():
+            await send(CHILD_B, tool_done("cell-b1", "failed", rawOutput="cancelled"))
+            await send(root, idle(CHILD_B, "cancelled"))
+        else:
+            await send(CHILD_B, tool_done("cell-b1", rawOutput="done"))
+            await send(root, idle(CHILD_B))
     await send(root, tool_done(ROOT_CELL, rawOutput="spawned"))
 
 
@@ -453,8 +472,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def add_subagent_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add --subagents."""
+    """Add --subagents and --cancel-wait."""
     parser.add_argument("--subagents", action="store_true")
+    parser.add_argument("--cancel-wait", type=float, default=0.0)
 
 
 async def run(args: argparse.Namespace) -> None:

@@ -101,7 +101,11 @@ from openhands.sdk.agent.acp_models import (
     ACPModelInfo,
     ACPSessionControls,
 )
-from openhands.sdk.agent.acp_subagents import ACPSubagentSessions
+from openhands.sdk.agent.acp_subagents import (
+    ACPSessionNotCancellableError,
+    ACPSessionNotFoundError,
+    ACPSubagentSessions,
+)
 from openhands.sdk.agent.acp_tracing import ACPTurnTrace
 from openhands.sdk.agent.acp_unstable import (
     SessionMessage,
@@ -194,6 +198,8 @@ _ACP_CONFIG_OPTION_TIMEOUT: float = float(
     os.environ.get("ACP_CONFIG_OPTION_TIMEOUT", "30.0")
 )
 _ACP_SESSION_CLOSE_TIMEOUT: float = 2.0
+# Bound for writing one sub-agent session/cancel notification.
+_ACP_SUBAGENT_CANCEL_TIMEOUT: float = 2.0
 _ACP_NPX_CACHE_WARM_TIMEOUT: float = float(
     os.environ.get("ACP_NPX_CACHE_WARM_TIMEOUT", "300")
 )
@@ -5026,6 +5032,42 @@ class ACPAgent(AgentBase):
         if self._client is not None and self._session_id is not None:
             self._client.wait_for_available_commands(self._session_id, timeout)
         return self.session_controls
+
+    def cancel_acp_session(self, session_id: str) -> None:
+        """Ask the ACP server to cancel one sub-agent session's current work.
+
+        Sends ``session/cancel`` for ``session_id`` when the server announced that
+        child on the live connection with a ``cancel`` capability. Returns once the
+        notification is written; the outcome arrives as the child's next state
+        update. Never takes the conversation's state lock, so it works mid-turn.
+
+        Raises:
+            ACPSessionNotFoundError: no sub-agent session with this id is known.
+            ACPSessionNotCancellableError: no live ACP connection, the root
+                session, or no current ``cancel`` grant.
+            TimeoutError: the notification was not written within 2 seconds.
+        """
+        if not self.has_live_acp_session:
+            raise ACPSessionNotCancellableError(session_id)
+        if self._client is None or self._client.subagents is None:
+            raise ACPSessionNotFoundError(session_id)
+        timeout = _ACP_SUBAGENT_CANCEL_TIMEOUT
+        try:
+            self._executor.run_async(
+                self._acancel_acp_session, session_id, timeout=timeout
+            )
+        except TimeoutError:
+            raise TimeoutError(
+                f"ACP server did not accept the cancel for {session_id} "
+                f"within {timeout:g}s."
+            ) from None
+
+    async def _acancel_acp_session(self, session_id: str) -> None:
+        """Check the live grant and send ``session/cancel``; on the ACP loop."""
+        assert self._client is not None and self._client.subagents is not None
+        assert self._conn is not None
+        self._client.subagents.check_cancel(session_id)
+        await self._conn.cancel(session_id=session_id)
 
     def close_acp_session(self, timeout: float = _ACP_SESSION_CLOSE_TIMEOUT) -> None:
         """Send session/close if the server advertised it; log and ignore errors."""
