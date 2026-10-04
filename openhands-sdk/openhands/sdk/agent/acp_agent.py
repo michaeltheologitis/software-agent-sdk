@@ -1452,10 +1452,8 @@ class _OpenHandsACPBridge:
         self.subagents: ACPSubagentSessions | None = (
             ACPSubagentSessions(mask=self._mask_value) if subagents else None
         )
-        # Sessions neither the root nor announced, warned about once per path:
-        # stable updates follow the root's, unstable ones keep their session.
-        self._unannounced_sessions: set[str] = set()
-        self._unannounced_unstable_sessions: set[str] = set()
+        # (session, routing) pairs already warned about as never announced.
+        self._warned_unannounced: set[tuple[str, str]] = set()
         # The conversation's emitter (ACPAgent._on_session_event), set per
         # connection; every child event goes through it.
         self.on_session_event: Callable[[Event], None] | None = None
@@ -1610,36 +1608,24 @@ class _OpenHandsACPBridge:
     ) -> None:
         """The shim's callback: route one unstable update; never awaits."""
         self._last_activity_monotonic = time.monotonic()
-        if self.subagents is None or session_id == self._fork_session_id:
+        subagents = self.subagents
+        if subagents is None or session_id == self._fork_session_id:
             return
-        self._warn_once_for_unannounced_unstable_traffic(session_id)
+        if session_id != subagents.root_session_id and not subagents.is_child(
+            session_id
+        ):
+            # A child this session announces cannot be placed in the tree.
+            self._warn_unannounced(
+                session_id, "keeping its sub-agent updates under its own id"
+            )
         if isinstance(update, SubagentUpdate):
-            events = self.subagents.on_subagent_update(session_id, update)
+            events = subagents.on_subagent_update(session_id, update)
         elif isinstance(update, SessionMessage):
-            events = self.subagents.on_session_message(session_id, update)
+            events = subagents.on_session_message(session_id, update)
         else:
-            events = self.subagents.on_session_message_chunk(session_id, update)
+            events = subagents.on_session_message_chunk(session_id, update)
         self.emit_subagent_events(events)
         self._maybe_signal_activity()
-
-    def _warn_once_for_unannounced_unstable_traffic(self, session_id: str) -> None:
-        """Warn once for a session that is neither the root nor an announced
-        child: its unstable updates stay under its own id, so a child it
-        announces cannot be placed."""
-        subagents = self.subagents
-        assert subagents is not None
-        if (
-            session_id == subagents.root_session_id
-            or subagents.is_child(session_id)
-            or session_id in self._unannounced_unstable_sessions
-        ):
-            return
-        self._unannounced_unstable_sessions.add(session_id)
-        logger.warning(
-            "ACP session %s was never announced as a sub-agent; "
-            "keeping its sub-agent updates under its own id",
-            _fingerprint_session_id(session_id),
-        )
 
     def emit_subagent_events(self, events: Sequence[Event]) -> None:
         """Submit each event to ``on_session_event``, in order; drop them while
@@ -1666,22 +1652,27 @@ class _OpenHandsACPBridge:
     def _child_session(self, session_id: str) -> str | None:
         """``session_id`` when it is an announced child, else None.
 
-        Warns once for a session that is neither the root nor a child: its
-        traffic follows the root's path, as without the opt-in.
+        A session that is neither the root nor a child is warned about once;
+        its traffic follows the root's path, as without the opt-in.
         """
         subagents = self.subagents
         if subagents is None or session_id == subagents.root_session_id:
             return None
         if subagents.is_child(session_id):
             return session_id
-        if session_id not in self._unannounced_sessions:
-            self._unannounced_sessions.add(session_id)
-            logger.warning(
-                "ACP session %s was never announced as a sub-agent; "
-                "routing its updates to the root session",
-                _fingerprint_session_id(session_id),
-            )
+        self._warn_unannounced(session_id, "routing its updates to the root session")
         return None
+
+    def _warn_unannounced(self, session_id: str, routing: str) -> None:
+        """Warn, once per session and routing, of a session never announced."""
+        if (session_id, routing) in self._warned_unannounced:
+            return
+        self._warned_unannounced.add((session_id, routing))
+        logger.warning(
+            "ACP session %s was never announced as a sub-agent; %s",
+            _fingerprint_session_id(session_id),
+            routing,
+        )
 
     def _route_child_update(self, child: str, update: Any) -> bool:
         """Store a child's text, usage or other non-tool update; False for a
