@@ -414,18 +414,22 @@ async def test_a_refusal_passes_the_agents_sentence_through(server):
 
 
 @pytest.mark.parametrize(
-    "agent, config_id",
-    [(plain_agent(), "profile"), (scripted_agent(), "model")],
-    ids=["not-acp", "model-option"],
+    "agent, config_id, status",
+    [
+        (plain_agent(), "profile", 400),
+        (scripted_agent(), "model", 400),
+        (scripted_agent(), "", 422),
+    ],
+    ids=["not-acp", "model-option", "empty-id"],
 )
-async def test_a_set_that_is_not_for_this_route_is_a_bad_request(
-    server, agent, config_id
+async def test_a_set_that_is_not_for_this_route_is_refused(
+    server, agent, config_id, status
 ):
     conversation_id = await server.start(agent=agent)
 
     response = await server.set_option(conversation_id, config_id, "x")
 
-    assert response.status_code == 400
+    assert response.status_code == status
 
 
 async def test_a_set_on_a_service_that_closed_after_its_lookup_is_a_bad_request(
