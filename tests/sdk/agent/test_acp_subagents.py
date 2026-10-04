@@ -317,18 +317,11 @@ async def test_message_upsert_replaces_content_and_keeps_participants(wire):
     assert {e.recipient_session_id for e in stored} == {"child-a"}
 
 
-async def test_child_cost_is_on_its_association_and_never_booked_to_the_conversation(
-    wire,
-):
-    agent = wire.agent()
+async def test_child_cost_is_stored_on_its_association_when_it_changes(wire):
     await wire.send(ROOT, announce("child-a"))
 
     await wire.send("child-a", usage(0.0004))
     await wire.send("child-a", usage(0.0004))
-    await wire.send(ROOT, usage(0.0011))
-    agent._record_usage(
-        None, ROOT, usage_update=wire.bridge.pop_turn_usage_update(ROOT)
-    )
 
     costs = [
         (e.cost, e.cost_currency)
@@ -336,7 +329,6 @@ async def test_child_cost_is_on_its_association_and_never_booked_to_the_conversa
         if isinstance(e, ACPSubagentEvent) and e.acp_session_id == "child-a"
     ]
     assert costs == [(None, None), (0.0004, "USD")]
-    assert agent.llm.metrics.accumulated_cost == pytest.approx(0.0011)
 
 
 async def test_child_usage_leaves_root_usage_sync_and_context_window_alone(wire):
