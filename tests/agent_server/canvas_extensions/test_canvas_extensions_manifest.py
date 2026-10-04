@@ -257,7 +257,10 @@ def test_a_header_panel_with_tabs_validates():
     "panel",
     [
         _panel(id="Not-Kebab"),
+        _panel(title=""),
+        _panel(tabs=[]),
         _panel(tabs=[{"id": "Bad_Id", "title": "T", "path": "/"}]),
+        _panel(tabs=[{"id": "tab", "title": "", "path": "/"}]),
         _panel(tabs=[{"id": "tab", "title": "T", "path": "relative"}]),
         _panel(tabs=[{"id": "tab", "title": "T", "path": "/Upper"}]),
         _panel(tabs=[{"id": "tab", "title": "T", "path": "/trailing/"}]),
@@ -267,17 +270,24 @@ def test_a_header_panel_with_tabs_validates():
                 {"id": "two", "title": "2", "path": "/same"},
             ]
         ),
+        _panel(
+            tabs=[{"id": "one", "title": "1", "path": "/"}, {"id": "two", "title": "2"}]
+        ),
         _panel(icon="/abs/panel.svg"),
         _panel(icon="../panel.svg"),
         _panel(icon="dist/panel.gif"),
     ],
     ids=[
         "panel-id",
+        "panel-title",
+        "no-tabs",
         "tab-id",
+        "tab-title",
         "relative-tab-path",
         "uppercase-tab-path",
         "trailing-slash",
         "duplicate-tab-path",
+        "duplicate-default-tab-path",
         "absolute-icon",
         "traversing-icon",
         "icon-type",
