@@ -536,6 +536,28 @@
           "unknown"
         ]
       ]
+    },
+    {
+      "category": "acp-protocol-meta",
+      "reason": "ACP _meta is opaque by protocol: implementations MUST NOT assume values at these keys.",
+      "owner": "OpenHands TypeScript client maintainers",
+      "entries": [
+        [
+          "events/types.d.ts::interface:ACPSessionMessageEvent/property:meta::unknown",
+          "unknown",
+          "Record<string, unknown> | null"
+        ],
+        [
+          "events/types.d.ts::interface:ACPSubagentEvent/property:meta::unknown",
+          "unknown",
+          "Record<string, unknown> | null"
+        ],
+        [
+          "events/types.d.ts::type:ACPToolCallEvent/property:meta::unknown",
+          "unknown",
+          "Record<string, unknown> | null"
+        ]
+      ]
     }
   ]
 }

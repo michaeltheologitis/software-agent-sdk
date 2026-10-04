@@ -43,6 +43,7 @@ import {
   type ACPSessionControls,
 } from '../models/acp-session-controls';
 import { acpSessionControlsOf } from '../events/types';
+import type { CancelAcpSessionResponse } from '../events/types';
 import type { EventPage } from '../types/base';
 
 /**
@@ -351,6 +352,18 @@ export class RemoteConversation implements IConversation {
     const response = await this.client.post<ACPConfigOptionSetResponse>(
       `/api/conversations/${this.id}/acp/config-options`,
       { config_id: configId, value }
+    );
+    return response.data;
+  }
+
+  /**
+   * Cancel one of this conversation's ACP sub-agent sessions. 409 when the
+   * child does not accept cancel now; its next `ACPSubagentEvent` confirms it.
+   */
+  async cancelAcpSession(sessionId: string): Promise<CancelAcpSessionResponse> {
+    const session = encodeURIComponent(sessionId);
+    const response = await this.client.post<CancelAcpSessionResponse>(
+      `/api/conversations/${this.id}/acp/sessions/${session}/cancel`
     );
     return response.data;
   }

@@ -35,7 +35,12 @@ import type {
   ACPSessionControls,
 } from '../models/acp-session-controls';
 
-export type ACPToolCallEvent = AgentServerAcpToolCallEvent;
+export type ACPToolCallEvent = AgentServerAcpToolCallEvent & {
+  /** The ACP sub-agent session the call ran in; absent for the root session. */
+  acp_session_id?: string | null;
+  /** The call's latest ACP `_meta`; recorded only for agents with `acp_subagents`. */
+  meta?: Record<string, unknown> | null;
+};
 export type ACPToolCallStatus = NonNullable<ACPToolCallEvent['status']>;
 export type ACPToolKind = NonNullable<ACPToolCallEvent['tool_kind']>;
 /**
@@ -180,6 +185,47 @@ export interface ACPSessionControlsEvent extends BaseEvent {
   config_options: ACPConfigOption[];
 }
 
+/** The latest association of an ACP sub-agent session with its parent. */
+export interface ACPSubagentEvent extends BaseEvent {
+  kind: 'ACPSubagentEvent';
+  acp_session_id: string;
+  parent_session_id?: string | null;
+  parent_tool_call_id?: string | null;
+  title?: string | null;
+  description?: string | null;
+  state?: string | null;
+  stop_reason?: string | null;
+  cancellable?: boolean;
+  cost?: number | null;
+  cost_currency?: string | null;
+  meta?: Record<string, unknown> | null;
+}
+
+/** A message between ACP sessions, as one session's transcript shows it. */
+export interface ACPSessionMessageEvent extends BaseEvent {
+  kind: 'ACPSessionMessageEvent';
+  acp_session_id?: string | null;
+  message_id: string;
+  sender_session_id?: string | null;
+  recipient_session_id?: string | null;
+  text?: string;
+  meta?: Record<string, unknown> | null;
+}
+
+/** A run of a sub-agent session's own streamed text or reasoning. */
+export interface ACPSessionTextEvent extends BaseEvent {
+  kind: 'ACPSessionTextEvent';
+  acp_session_id: string;
+  thought?: boolean;
+  text: string;
+}
+
+/** A cancel sent to an ACP sub-agent session; its outcome arrives later. */
+export interface CancelAcpSessionResponse {
+  session_id: string;
+  requested: boolean;
+}
+
 /**
  * Union type of all conversation events
  */
@@ -190,7 +236,10 @@ export type ConversationEvent =
   | StuckDetectionEvent
   | FinishEvent
   | ThinkEvent
-  | ACPSessionControlsEvent;
+  | ACPSessionControlsEvent
+  | ACPSubagentEvent
+  | ACPSessionMessageEvent
+  | ACPSessionTextEvent;
 
 /**
  * Type guard to check if an event is a MessageEvent
@@ -259,6 +308,27 @@ export function isHookExecutionEvent(event: BaseEvent): event is HookExecutionEv
  */
 export function isACPSessionControlsEvent(event: BaseEvent): event is ACPSessionControlsEvent {
   return event.kind === 'ACPSessionControlsEvent';
+}
+
+/**
+ * Type guard to check if an event is an ACPSubagentEvent
+ */
+export function isACPSubagentEvent(event: BaseEvent): event is ACPSubagentEvent {
+  return event.kind === 'ACPSubagentEvent';
+}
+
+/**
+ * Type guard to check if an event is an ACPSessionMessageEvent
+ */
+export function isACPSessionMessageEvent(event: BaseEvent): event is ACPSessionMessageEvent {
+  return event.kind === 'ACPSessionMessageEvent';
+}
+
+/**
+ * Type guard to check if an event is an ACPSessionTextEvent
+ */
+export function isACPSessionTextEvent(event: BaseEvent): event is ACPSessionTextEvent {
+  return event.kind === 'ACPSessionTextEvent';
 }
 
 /**

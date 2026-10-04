@@ -40,6 +40,11 @@
       "endpoints": ["POST /api/acp/preview", "POST /api/conversations/{}/acp/config-options"],
       "reason": "Client-ahead until the pinned Agent Server release carries the ACP session-controls routes.",
       "owner": "OpenHands TypeScript client maintainers"
+    },
+    {
+      "endpoints": ["POST /api/conversations/{}/acp/sessions/{}/cancel"],
+      "reason": "Client-ahead of the pinned Agent Server release, which does not yet carry ACP sub-agent sessions.",
+      "owner": "OpenHands TypeScript client maintainers"
     }
   ],
 
