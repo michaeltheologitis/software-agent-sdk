@@ -16,7 +16,7 @@ from openhands.sdk import Agent
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.conversation import LocalConversation
 from openhands.sdk.conversation.state import ConversationState
-from openhands.sdk.event import ACPSessionControlsEvent, Event
+from openhands.sdk.event import ACPSessionControlsEvent, ACPSubagentEvent, Event
 from openhands.sdk.io import InMemoryFileStore
 from openhands.sdk.llm import LLM
 from openhands.sdk.tool import ToolExecutor
@@ -136,13 +136,20 @@ def controls_events(events: Iterable[Event]) -> list[ACPSessionControlsEvent]:
     return [e for e in events if isinstance(e, ACPSessionControlsEvent)]
 
 
-def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> None:
-    """Poll ``condition`` until it is truthy; fail after ``timeout`` seconds."""
+def subagent_snapshots(events: Iterable[Event]) -> dict[str, ACPSubagentEvent]:
+    """The latest ACPSubagentEvent of each child session among ``events``."""
+    return {e.acp_session_id: e for e in events if isinstance(e, ACPSubagentEvent)}
+
+
+def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> Any:
+    """Poll ``condition`` until it is truthy and return what it returned; fail
+    after ``timeout`` seconds."""
     deadline = time.monotonic() + timeout
-    while not condition():
+    while not (result := condition()):
         if time.monotonic() > deadline:
             raise AssertionError("condition not met in time")
         time.sleep(0.02)
+    return result
 
 
 @pytest.fixture(scope="session")
