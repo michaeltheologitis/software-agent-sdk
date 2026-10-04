@@ -25,10 +25,11 @@ from acp.schema import (
 from pydantic import ValidationError
 
 from openhands.sdk.agent.acp_unstable import (
+    SessionMessage,
     SubagentClientSideConnection,
     UnstableSessionUpdate,
 )
-from tests.fixtures.acp.scripted_agent import message, said, subagent
+from tests.fixtures.acp.scripted_agent import message, said, subagent, text
 
 
 LIBRARY_CAUGHT_UP = (
@@ -162,6 +163,20 @@ async def test_unstable_updates_reach_the_callback_in_wire_order():
     assert [
         (session_id, update.session_update) for session_id, update in recorder.received
     ] == [(session_id, update["sessionUpdate"]) for session_id, update in sent]
+
+
+async def test_session_message_with_a_non_text_block_reaches_the_callback_whole():
+    image = {"type": "image", "data": "AAAA", "mimeType": "image/png"}
+    recorder = Recorder()
+    async with wired(recorder) as wire:
+        await wire.send(
+            "root", message("m1", "root", "child", "see", content=[text("see"), image])
+        )
+        await settle(recorder, 1)
+
+    [(_, update)] = recorder.received
+    assert isinstance(update, SessionMessage)
+    assert [block.type for block in update.content or []] == ["text", "image"]
 
 
 async def test_stable_updates_still_reach_the_library_router():
