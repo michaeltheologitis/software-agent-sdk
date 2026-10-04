@@ -31,7 +31,7 @@ from acp.schema import (
     TextContentBlock,
 )
 from acp.utils import request_model
-from pydantic import ConfigDict, Field, SerializeAsAny, TypeAdapter, ValidationError
+from pydantic import Field, SerializeAsAny, TypeAdapter, ValidationError
 
 from openhands.sdk.logger import get_logger
 
@@ -66,9 +66,7 @@ class SubagentSessionCapabilities(ACPModel):
 
 
 class SubagentState(ACPModel):
-    """running, idle, requires_action, unknown, or a custom state kept whole."""
-
-    model_config = ConfigDict(extra="allow")
+    """running, idle, requires_action, unknown, or a custom state."""
 
     state: str
     stop_reason: Annotated[StopReason | None, Field(alias="stopReason")] = None

@@ -221,16 +221,6 @@ def test_patch_fields_tell_omitted_from_null():
     assert "title" not in omitted.model_fields_set
 
 
-def test_custom_state_is_kept_whole():
-    update = SubagentUpdate.model_validate(
-        subagent_update("child", state={"state": "_reviewing", "x": 1})
-    )
-
-    assert update.state is not None
-    assert update.state.state == "_reviewing"
-    assert update.state.model_dump()["x"] == 1
-
-
 def test_message_content_keeps_non_text_blocks_typed():
     message = SessionMessage.model_validate(
         {
