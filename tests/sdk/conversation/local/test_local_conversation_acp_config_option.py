@@ -96,11 +96,13 @@ def test_the_agent_swap_hands_publishing_to_the_copy(scripted_conversation):
     agent._client.record_available_commands(
         agent._session_id, [AvailableCommand(name="late", description="")]
     )
+    # The agent's own commands for the new profile may be handled after this
+    # record, so look for "late" in any snapshot rather than only the last.
     wait_until(
-        lambda: [
-            c.name for c in controls_events(conv.state.events)[-1].available_commands
-        ]
-        == ["late"]
+        lambda: any(
+            [c.name for c in event.available_commands] == ["late"]
+            for event in controls_events(conv.state.events)
+        )
     )
 
 
