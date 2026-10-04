@@ -109,7 +109,6 @@ from openhands.sdk.agent.acp_subagents import (
 )
 from openhands.sdk.agent.acp_tracing import ACPTurnTrace
 from openhands.sdk.agent.acp_unstable import (
-    SUBAGENT_CLIENT_CAPABILITIES,
     SessionMessage,
     SessionMessageChunk,
     SubagentClientSideConnection,
@@ -3473,13 +3472,7 @@ class ACPAgent(AgentBase):
             self._stderr_log_task = stderr_log_task
 
             # Initialize the protocol and discover server identity
-            if self.acp_subagents:
-                init_response = await conn.initialize(
-                    protocol_version=1,
-                    client_capabilities=SUBAGENT_CLIENT_CAPABILITIES,
-                )
-            else:
-                init_response = await conn.initialize(protocol_version=1)
+            init_response = await conn.initialize(protocol_version=1)
             agent_name = ""
             agent_version = ""
             if init_response.agent_info is not None:

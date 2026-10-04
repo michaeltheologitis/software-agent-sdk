@@ -24,13 +24,14 @@ from acp.schema import (
     EmbeddedResourceContentBlock,
     ImageContentBlock,
     Implementation,
+    InitializeRequest,
     InitializeResponse,
     ResourceContentBlock,
     StopReason,
     TextContentBlock,
 )
 from acp.utils import request_model
-from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import ConfigDict, Field, SerializeAsAny, TypeAdapter, ValidationError
 
 from openhands.sdk.logger import get_logger
 
@@ -140,14 +141,13 @@ SUBAGENT_CLIENT_CAPABILITIES: Final = SubagentClientCapabilities(
 )
 
 
-class _SubagentInitializeRequest(ACPModel):
-    protocol_version: Annotated[int, Field(alias="protocolVersion")]
+class _SubagentInitializeRequest(InitializeRequest):
+    """Serializes a capabilities subclass whole, so ``subagents`` reaches the wire."""
+
     client_capabilities: Annotated[
-        SubagentClientCapabilities,
+        SerializeAsAny[ClientCapabilities] | None,
         Field(alias="clientCapabilities"),
-    ]
-    client_info: Annotated[Implementation | None, Field(alias="clientInfo")] = None
-    field_meta: Annotated[dict[str, Any] | None, Field(alias="_meta")] = None
+    ] = None
 
 
 # ClientSideConnection is @final in agent-client-protocol 0.12.1; this subclass
@@ -156,7 +156,7 @@ class SubagentClientSideConnection(
     ClientSideConnection,  # pyright: ignore[reportGeneralTypeIssues]
 ):
     """A ClientSideConnection that hands ACP's unstable sub-agent updates to a
-    callback ahead of the library's router, and can advertise ``subagents``."""
+    callback ahead of the library's router, and advertises ``subagents``."""
 
     def __init__(
         self,
@@ -178,18 +178,14 @@ class SubagentClientSideConnection(
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        """Send ``initialize`` typed with ``SubagentClientCapabilities`` when given
-        one, so ``subagents`` reaches the wire; otherwise the library's call."""
-        if not isinstance(client_capabilities, SubagentClientCapabilities):
-            return await super().initialize(
-                protocol_version, client_capabilities, client_info, **kwargs
-            )
+        """Send ``initialize``, advertising ``subagents`` unless given other
+        capabilities."""
         return await request_model(
             self._conn,
             AGENT_METHODS["initialize"],
             _SubagentInitializeRequest(
                 protocol_version=protocol_version,
-                client_capabilities=client_capabilities,
+                client_capabilities=client_capabilities or SUBAGENT_CLIENT_CAPABILITIES,
                 client_info=client_info,
                 field_meta=kwargs or None,
             ),

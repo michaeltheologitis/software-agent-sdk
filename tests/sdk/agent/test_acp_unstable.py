@@ -19,15 +19,12 @@ from acp.connection import Connection, JsonValue
 from acp.schema import (
     AgentMessageChunk,
     ClientCapabilities,
-    InitializeRequest,
     InitializeResponse,
     SessionNotification,
 )
-from acp.utils import serialize_params
 from pydantic import ValidationError
 
 from openhands.sdk.agent.acp_unstable import (
-    SUBAGENT_CLIENT_CAPABILITIES,
     SessionMessage,
     SubagentClientSideConnection,
     SubagentUpdate,
@@ -155,26 +152,12 @@ def test_acp_library_has_no_subagents_capability():
 async def test_initialize_puts_subagents_capability_on_the_wire():
     agent = Agent()
     async with wired(Recorder(), agent) as wire:
-        await wire.client.initialize(
-            protocol_version=1, client_capabilities=SUBAGENT_CLIENT_CAPABILITIES
-        )
+        await wire.client.initialize(protocol_version=1)
 
-    assert agent.initialize_params["clientCapabilities"] == {
-        "auth": {},
-        "subagents": {},
+    assert agent.initialize_params == {
+        "protocolVersion": 1,
+        "clientCapabilities": {"auth": {}, "subagents": {}},
     }
-
-
-async def test_initialize_without_subagent_capabilities_is_the_library_call():
-    agent = Agent()
-    async with wired(Recorder(), agent) as wire:
-        response = await wire.client.initialize(protocol_version=1)
-
-    library_call = InitializeRequest(
-        protocol_version=1, client_capabilities=ClientCapabilities()
-    )
-    assert response.protocol_version == 1
-    assert agent.initialize_params == serialize_params(library_call)
 
 
 # -- Routing ---------------------------------------------------------------------
