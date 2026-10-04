@@ -198,3 +198,142 @@ def test_missing_required_field_rejected(missing_field: str):
 def test_schema_version_rejects_non_integer():
     with pytest.raises(ValidationError, match="schema_version"):
         _manifest(schema_version="not-a-number")
+
+
+# -- Conversation panels -------------------------------------------------------
+
+
+def _panel(**overrides: Any) -> dict[str, Any]:
+    panel: dict[str, Any] = {
+        "id": "decompositions",
+        "title": "Decompositions",
+        "tabs": [{"id": "browse", "title": "Browse", "path": "/"}],
+    }
+    panel.update(overrides)
+    return panel
+
+
+def _manifest_with_panels(*panels: dict[str, Any], **contributes: Any):
+    return CanvasExtensionManifest.model_validate(
+        {
+            "schema_version": 1,
+            "name": "my-extension",
+            "display_name": "My Extension",
+            "version": "1.0.0",
+            "entrypoint": "dist/index.js",
+            "contributes": {"conversation_panels": list(panels), **contributes},
+        }
+    )
+
+
+def test_a_header_panel_with_tabs_validates():
+    manifest = _manifest_with_panels(
+        _panel(
+            icon="dist/panel.svg",
+            tabs=[
+                {"id": "browse", "title": "Decompositions", "path": "/"},
+                {"id": "create", "title": "Create decomposition", "path": "/create"},
+                {"id": "namespaces", "title": "Namespaces", "path": "/namespaces"},
+                {"id": "tools", "title": "Tools", "path": "/tools"},
+            ],
+        )
+    )
+
+    (panel,) = manifest.contributes.conversation_panels
+    assert (panel.id, panel.title, panel.icon) == (
+        "decompositions",
+        "Decompositions",
+        "dist/panel.svg",
+    )
+    assert [(t.id, t.path) for t in panel.tabs] == [
+        ("browse", "/"),
+        ("create", "/create"),
+        ("namespaces", "/namespaces"),
+        ("tools", "/tools"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "panel",
+    [
+        _panel(id="Not-Kebab"),
+        _panel(title=""),
+        _panel(tabs=[]),
+        _panel(tabs=[{"id": "Bad_Id", "title": "T", "path": "/"}]),
+        _panel(tabs=[{"id": "tab", "title": "", "path": "/"}]),
+        _panel(tabs=[{"id": "tab", "title": "T", "path": "relative"}]),
+        _panel(tabs=[{"id": "tab", "title": "T", "path": "/Upper"}]),
+        _panel(tabs=[{"id": "tab", "title": "T", "path": "/trailing/"}]),
+        _panel(
+            tabs=[
+                {"id": "one", "title": "1", "path": "/same"},
+                {"id": "two", "title": "2", "path": "/same"},
+            ]
+        ),
+        _panel(
+            tabs=[{"id": "one", "title": "1", "path": "/"}, {"id": "two", "title": "2"}]
+        ),
+        _panel(icon="/abs/panel.svg"),
+        _panel(icon="../panel.svg"),
+        _panel(icon="dist/panel.gif"),
+    ],
+    ids=[
+        "panel-id",
+        "panel-title",
+        "no-tabs",
+        "tab-id",
+        "tab-title",
+        "relative-tab-path",
+        "uppercase-tab-path",
+        "trailing-slash",
+        "duplicate-tab-path",
+        "duplicate-default-tab-path",
+        "absolute-icon",
+        "traversing-icon",
+        "icon-type",
+    ],
+)
+def test_a_malformed_panel_makes_the_manifest_invalid(panel: dict[str, Any]):
+    with pytest.raises(ValidationError):
+        _manifest_with_panels(panel)
+
+
+@pytest.mark.parametrize(
+    "panels, pages",
+    [
+        ([_panel(id="shared")], [{"id": "shared", "title": "P", "path": "/p"}]),
+        (
+            [_panel(tabs=[{"id": "shared", "title": "T"}])],
+            [{"id": "shared", "title": "P", "path": "/p"}],
+        ),
+        ([_panel(), _panel(tabs=[{"id": "other", "title": "T"}])], []),
+        ([_panel(tabs=[{"id": "decompositions", "title": "T"}])], []),
+        ([_panel(), _panel(id="second")], []),
+    ],
+    ids=[
+        "page-and-panel",
+        "page-and-tab",
+        "two-panels",
+        "panel-and-tab",
+        "tabs-in-two-panels",
+    ],
+)
+def test_pages_panels_and_tabs_share_one_id_namespace(panels, pages):
+    with pytest.raises(ValidationError, match="Duplicate contribution id"):
+        _manifest_with_panels(*panels, pages=pages)
+
+
+def test_a_manifest_without_panels_dumps_exactly_as_before():
+    """A local App's backend approval revision hashes this dump."""
+    manifest = _manifest(
+        contributes=CanvasExtensionContributes(
+            pages=[CanvasExtensionPage(id="home", title="Home", path="/home")]
+        )
+    )
+
+    assert "conversation_panels" not in manifest.model_dump()
+    assert manifest.model_dump_json() == (
+        '{"schema_version":1,"name":"my-extension","display_name":"My Extension",'
+        '"version":"1.0.0","description":"","entrypoint":"dist/index.js",'
+        '"contributes":{"pages":[{"id":"home","title":"Home","path":"/home"}]}}'
+    )

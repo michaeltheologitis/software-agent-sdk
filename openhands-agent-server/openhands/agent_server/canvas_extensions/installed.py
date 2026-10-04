@@ -26,6 +26,7 @@ from openhands.agent_server.canvas_extensions.manifest import (
     MANIFEST_FILENAME,
     CanvasExtensionManifest,
     resolve_entrypoint,
+    resolve_panel_icon,
 )
 from openhands.sdk.extensions.fetch import fetch_with_resolution
 from openhands.sdk.extensions.installation import (
@@ -58,6 +59,8 @@ class CanvasExtensionInstallationInterface(
         )
         # Containment must hold too -- a parseable manifest alone isn't enough.
         resolve_entrypoint(manifest, extension_dir)
+        for panel in manifest.contributes.conversation_panels:
+            resolve_panel_icon(manifest, panel.id, extension_dir)
         return manifest
 
 
@@ -246,6 +249,24 @@ def get_canvas_extension_bundle_path(
     if manifest is None:
         return None
     return resolve_entrypoint(manifest, installed_dir / name)
+
+
+def get_canvas_extension_panel_icon_path(
+    name: str, panel_id: str, installed_dir: Path | None = None
+) -> Path | None:
+    """Re-validated icon path for a serve; None if anything is missing or invalid.
+
+    Like the bundle, re-validated against the live install path on every
+    call, since a symlink could change between requests.
+    """
+    installed_dir = _resolve_installed_dir(installed_dir)
+    manifest = get_installed_canvas_extension_manifest(name, installed_dir)
+    if manifest is None:
+        return None
+    try:
+        return resolve_panel_icon(manifest, panel_id, installed_dir / name)
+    except ValueError:
+        return None
 
 
 class CanvasExtensionUpdateCheck(BaseModel):
