@@ -17,7 +17,6 @@ import asyncio
 import os
 import shlex
 import threading
-import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -34,6 +33,7 @@ from openhands.sdk.event import (
     Event,
 )
 from openhands.sdk.tool.builtins.finish import FinishAction
+from tests.conftest import subagent_snapshots, wait_until
 
 
 pytestmark = pytest.mark.acp_live
@@ -52,23 +52,6 @@ requires_live_agent = pytest.mark.skipif(
         "are not both set"
     ),
 )
-
-
-def wait_until(condition: Callable[[], Any], timeout: float) -> Any:
-    deadline = time.monotonic() + timeout
-    while not (result := condition()):
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.1)
-    return result
-
-
-def latest_snapshots(events: list[Event]) -> dict[str, ACPSubagentEvent]:
-    latest: dict[str, ACPSubagentEvent] = {}
-    for event in events:
-        if isinstance(event, ACPSubagentEvent):
-            latest[event.acp_session_id] = event
-    return latest
 
 
 def descendants(snapshots: dict[str, ACPSubagentEvent], session: str) -> set[str]:
@@ -110,7 +93,7 @@ def test_live_agent_tree_is_well_formed(live_conversation):
     conv.run()
 
     def settled() -> dict[str, ACPSubagentEvent] | None:
-        snapshots = latest_snapshots(list(conv.state.events))
+        snapshots = subagent_snapshots(conv.state.events)
         done = snapshots and all(s.state != "running" for s in snapshots.values())
         return snapshots if done else None
 
@@ -158,7 +141,7 @@ def test_live_agent_stops_one_subagent_and_its_branch(live_conversation):
         if stopped or not isinstance(event, ACPSubagentEvent):
             return
         parent = event.parent_session_id
-        snapshot = latest_snapshots(seen).get(parent or "")
+        snapshot = subagent_snapshots(seen).get(parent or "")
         if snapshot is None or not snapshot.cancellable:
             return
         if snapshot.state != "running":
@@ -179,7 +162,7 @@ def test_live_agent_stops_one_subagent_and_its_branch(live_conversation):
     [branch_root] = stopped
 
     def branch_cancelled() -> dict[str, ACPSubagentEvent] | None:
-        snapshots = latest_snapshots(list(conv.state.events))
+        snapshots = subagent_snapshots(conv.state.events)
         branch = {branch_root} | descendants(snapshots, branch_root)
         done = all(
             (snapshots[s].state, snapshots[s].stop_reason) == ("idle", "cancelled")

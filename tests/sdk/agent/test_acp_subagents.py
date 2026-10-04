@@ -15,8 +15,9 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,7 @@ from openhands.sdk.event import (
     ACPToolCallEvent,
     Event,
 )
-from tests.conftest import scripted_acp_command
+from tests.conftest import scripted_acp_command, subagent_snapshots, wait_until
 from tests.fixtures.acp.scripted_agent import (
     announce,
     idle,
@@ -101,11 +102,7 @@ class Wire:
             await self.bridge.session_update(session_id, notification.update)
 
     def latest(self, child: str) -> ACPSubagentEvent:
-        return [
-            e
-            for e in self.emitted
-            if isinstance(e, ACPSubagentEvent) and e.acp_session_id == child
-        ][-1]
+        return subagent_snapshots(self.emitted)[child]
 
     def agent(self) -> ACPAgent:
         """An agent bound to this bridge, with no process behind it."""
@@ -592,26 +589,8 @@ async def test_unstable_updates_on_an_unannounced_session_stay_under_that_sessio
 # -- Through a conversation, against the scripted agent ---------------------------
 
 
-def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> Any:
-    deadline = time.monotonic() + timeout
-    while not (result := condition()):
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.02)
-    return result
-
-
-def latest(events: Sequence[Event], child: str) -> ACPSubagentEvent | None:
-    snapshots = [
-        e
-        for e in events
-        if isinstance(e, ACPSubagentEvent) and e.acp_session_id == child
-    ]
-    return snapshots[-1] if snapshots else None
-
-
 def turned_idle(conv: LocalConversation, child: str) -> ACPSubagentEvent | None:
-    snapshot = latest(list(conv.state.events), child)
+    snapshot = subagent_snapshots(conv.state.events).get(child)
     return snapshot if snapshot is not None and snapshot.state == "idle" else None
 
 
@@ -619,14 +598,12 @@ def tree_from(events: Sequence[Event]) -> dict[str | None, dict[str, Any]]:
     """The sub-agent tree stored ``events`` describe, read by the persisted
     contract: latest snapshot per child, placed by its spawning cell;
     per-session tool calls and messages, last wins."""
-    snapshots: dict[str, ACPSubagentEvent] = {}
+    snapshots = subagent_snapshots(events)
     calls: dict[tuple[str | None, str], ACPToolCallEvent] = {}
     messages: dict[tuple[str | None, str], ACPSessionMessageEvent] = {}
     texts: dict[str, list[tuple[bool, str]]] = {}
     for event in events:
-        if isinstance(event, ACPSubagentEvent):
-            snapshots[event.acp_session_id] = event
-        elif isinstance(event, ACPToolCallEvent):
+        if isinstance(event, ACPToolCallEvent):
             calls[(event.acp_session_id, event.tool_call_id)] = event
         elif isinstance(event, ACPSessionMessageEvent):
             messages[(event.acp_session_id, event.message_id)] = event
@@ -714,33 +691,9 @@ def scripted_tree(root: str) -> dict[str | None, dict[str, Any]]:
 
 
 @pytest.fixture
-def conversation(tmp_path: Path) -> Iterator[Callable[..., LocalConversation]]:
-    conversations: list[LocalConversation] = []
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    def _conversation(
-        *flags: str,
-        conversation_id: uuid.UUID | None = None,
-        **fields: Any,
-    ) -> LocalConversation:
-        agent = ACPAgent(
-            acp_command=scripted_acp_command(*flags),
-            **{"acp_subagents": True, **fields},
-        )
-        conv = LocalConversation(
-            agent,
-            workspace=str(workspace),
-            persistence_dir=str(tmp_path / "conversations"),
-            conversation_id=conversation_id,
-            visualizer=None,
-        )
-        conversations.append(conv)
-        return conv
-
-    yield _conversation
-    for conv in conversations:
-        conv.close()
+def conversation(scripted_conversation) -> Callable[..., LocalConversation]:
+    """``scripted_conversation`` with sub-agent sessions on."""
+    return partial(scripted_conversation, acp_subagents=True)
 
 
 def run(conv: LocalConversation, prompt: str = "hello") -> list[Event]:
@@ -850,7 +803,7 @@ def test_cancel_acp_session_for_an_idle_child_that_keeps_its_grant_is_sent(
 
     cancel = {"method": "session/cancel", "params": {"sessionId": "child-b"}}
     wait_until(lambda: cancel in acp_request_log())
-    assert latest(list(conv.state.events), "child-b") == idle_with_grant
+    assert subagent_snapshots(conv.state.events)["child-b"] == idle_with_grant
 
 
 def test_cancel_acp_session_refuses_a_child_without_a_grant(
@@ -1059,7 +1012,7 @@ def test_a_reconnect_snapshot_is_later_than_the_childs_earlier_events(
     wait_until(lambda: answers(first) == 1)
     first.close()
 
-    second = conversation("--transcript", transcript, conversation_id=first.id)
+    second = conversation(conversation_id=first.id)
     run(second)
     wait_until(lambda: answers(second) == 2)
     events = list(second.state.events)
@@ -1090,20 +1043,17 @@ def test_a_spawning_cells_started_event_precedes_its_whole_subtree(conversation)
     wait_until(lambda: turned_idle(conv, "child-b"))
     events = list(conv.state.events)
 
+    snapshots = subagent_snapshots(events)
     children: dict[str | None, set[str]] = {}
-    for event in events:
-        if isinstance(event, ACPSubagentEvent):
-            children.setdefault(event.parent_session_id, set()).add(
-                event.acp_session_id
-            )
+    for child, snapshot in snapshots.items():
+        children.setdefault(snapshot.parent_session_id, set()).add(child)
 
     def subtree(child: str) -> set[str]:
         return {child}.union(*(subtree(c) for c in children.get(child, set())))
 
-    checked = 0
-    for child in sorted(set().union(*children.values())):
-        snapshot = latest(events, child)
-        assert snapshot is not None and snapshot.parent_tool_call_id is not None
+    assert sorted(snapshots) == ["child-a", "child-a-1", "child-b", "child-c"]
+    for child, snapshot in snapshots.items():
+        assert snapshot.parent_tool_call_id is not None
         started = next(
             i
             for i, e in enumerate(events)
@@ -1116,5 +1066,3 @@ def test_a_spawning_cells_started_event_precedes_its_whole_subtree(conversation)
             if session_of(later) in members:
                 assert position > started
                 assert stored_at(later) >= stored_at(events[started])
-        checked += 1
-    assert checked == 4
