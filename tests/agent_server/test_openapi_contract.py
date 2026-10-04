@@ -128,6 +128,18 @@ def test_mcp_server_crud_operations_use_canonical_contract_types() -> None:
     }
 
 
+def test_panel_icon_route_is_documented_as_a_png_or_svg_image() -> None:
+    document = build_public_openapi()
+    operation = document["paths"][
+        "/api/canvas-extensions/installed/{extension_name}/panels/{panel_id}/icon"
+    ]["get"]
+
+    assert operation["responses"]["200"]["content"] == {
+        "image/png": {"schema": {"type": "string", "format": "binary"}},
+        "image/svg+xml": {"schema": {"type": "string", "format": "binary"}},
+    }
+
+
 def test_mcp_server_patch_tracks_every_canonical_server_field() -> None:
     """Keep the sparse patch contract in lock-step with the persisted model."""
     assert set(MCPServerPatch.model_fields) == set(MCPServer.model_fields)

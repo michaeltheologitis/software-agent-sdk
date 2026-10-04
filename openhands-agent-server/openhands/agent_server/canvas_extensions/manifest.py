@@ -16,9 +16,9 @@ two security-critical checks around it:
 
 import re
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from openhands.sdk.extensions.installation.utils import validate_extension_name
 
@@ -30,25 +30,38 @@ MANIFEST_FILENAME: Final[str] = "canvas-extension.json"
 _PAGE_PATH_PATTERN: re.Pattern[str] = re.compile(
     r"^/[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)*$"
 )
+# "/" or an absolute kebab-case path; a tab's place inside its panel.
+_TAB_PATH_PATTERN: re.Pattern[str] = re.compile(
+    r"^/(?:[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)*)?$"
+)
+PANEL_ICON_MEDIA_TYPES: Final[dict[str, str]] = {
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
+
+
+def _validate_contribution_id(value: str) -> str:
+    """Refuse an id that is not kebab-case, as validate_extension_name does."""
+    try:
+        validate_extension_name(value)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid contribution id. Expected kebab-case, got {value!r}."
+        ) from e
+    return value
+
+
+ContributionId = Annotated[str, AfterValidator(_validate_contribution_id)]
 
 
 class CanvasExtensionPage(BaseModel):
     """A single page contributed to the Canvas UI by an extension."""
 
-    id: str = Field(description="Unique contribution id within the extension")
+    id: ContributionId = Field(
+        description="Unique contribution id within the extension"
+    )
     title: str = Field(description="Page title shown in Canvas navigation")
     path: str = Field(description="Route the page is mounted at, e.g. '/dashboard'")
-
-    @field_validator("id")
-    @classmethod
-    def _validate_id(cls, v: str) -> str:
-        try:
-            validate_extension_name(v)
-        except ValueError as e:
-            raise ValueError(
-                f"Invalid contribution id. Expected kebab-case, got {v!r}."
-            ) from e
-        return v
 
     @field_validator("path")
     @classmethod
@@ -61,12 +74,96 @@ class CanvasExtensionPage(BaseModel):
         return v
 
 
+class CanvasExtensionPanelTab(BaseModel):
+    """One tab of a conversation panel; its page mounts when the tab is selected."""
+
+    id: ContributionId = Field(
+        description="Contribution id; the id the App registers this tab's page under",
+    )
+    title: str = Field(min_length=1, description="Tab label in the panel's tab row")
+    path: str = Field(
+        default="/",
+        description="Where the tab's page starts inside the panel; '/' is its root",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        if not _TAB_PATH_PATTERN.fullmatch(value):
+            raise ValueError(
+                "Invalid tab path. Expected '/' or an absolute kebab-case path "
+                f"(e.g. '/create'), got {value!r}."
+            )
+        return value
+
+
+class CanvasExtensionConversationPanel(BaseModel):
+    """A panel opened from a button in the conversation header."""
+
+    id: ContributionId = Field(description="Contribution id of the panel")
+    title: str = Field(
+        min_length=1,
+        description="Panel title; the header button's tooltip is 'Show' and this",
+    )
+    icon: str | None = Field(
+        default=None, description="Package-relative .svg or .png for the header button"
+    )
+    tabs: list[CanvasExtensionPanelTab] = Field(
+        min_length=1, description="The panel's tabs, in tab-row order"
+    )
+
+    @field_validator("icon")
+    @classmethod
+    def _validate_icon(cls, value: str | None) -> str | None:
+        """Reject textual traversal, absolute paths and other file types.
+
+        Syntactic only -- see :func:`resolve_panel_icon` for the symlink-aware
+        containment check against the installed package root.
+        """
+        if value is None:
+            return value
+        if value.startswith("/") or ".." in Path(value).parts:
+            raise ValueError("panel icon must be a package-relative path")
+        if Path(value).suffix not in PANEL_ICON_MEDIA_TYPES:
+            raise ValueError("panel icon must be a .svg or .png file")
+        return value
+
+    @field_validator("tabs")
+    @classmethod
+    def _validate_unique_tab_paths(
+        cls, value: list[CanvasExtensionPanelTab]
+    ) -> list[CanvasExtensionPanelTab]:
+        paths = [tab.path for tab in value]
+        if len(paths) != len(set(paths)):
+            raise ValueError("Duplicate tab path in a conversation panel")
+        return value
+
+
 class CanvasExtensionContributes(BaseModel):
     """Contributions an extension makes to the Canvas UI."""
 
     pages: list[CanvasExtensionPage] = Field(
         default_factory=list, description="Pages contributed to Canvas navigation"
     )
+    conversation_panels: list[CanvasExtensionConversationPanel] = Field(
+        default_factory=list,
+        # Omitted when empty, so a manifest without panels dumps as before: a
+        # local App's backend approval revision is a hash of that dump.
+        exclude_if=lambda value: not value,
+        description="Panels opened from buttons in the conversation header",
+    )
+
+    @model_validator(mode="after")
+    def _validate_unique_contribution_ids(self) -> "CanvasExtensionContributes":
+        """Page, panel and tab ids form one namespace per extension."""
+        ids = [page.id for page in self.pages]
+        for panel in self.conversation_panels:
+            ids.append(panel.id)
+            ids.extend(tab.id for tab in panel.tabs)
+        duplicates = sorted({i for i in ids if ids.count(i) > 1})
+        if duplicates:
+            raise ValueError(f"Duplicate contribution id: {duplicates[0]!r}")
+        return self
 
     @field_validator("pages")
     @classmethod
@@ -237,16 +334,45 @@ def resolve_entrypoint(manifest: CanvasExtensionManifest, package_root: Path) ->
             a directory, a dangling symlink, and symlink cycles — none of
             which ``is_relative_to`` alone rejects).
     """
+    return resolve_package_file(package_root, manifest.entrypoint, "entrypoint")
+
+
+def resolve_package_file(package_root: Path, relative: str, what: str) -> Path:
+    """Resolve ``relative`` inside ``package_root`` to a contained regular file.
+
+    Symlinks are resolved before containment is checked.
+
+    Raises:
+        ValueError: It escapes the package or is not a regular file.
+    """
     root = package_root.resolve()
-    candidate = (root / manifest.entrypoint).resolve()
+    candidate = (root / relative).resolve()
     if not candidate.is_relative_to(root):
         raise ValueError(
-            f"entrypoint {manifest.entrypoint!r} resolves outside the "
-            "extension package root"
+            f"{what} {relative!r} resolves outside the extension package root"
         )
     if not candidate.is_file():
         raise ValueError(
-            f"entrypoint {manifest.entrypoint!r} does not resolve to a file "
-            "in the extension package"
+            f"{what} {relative!r} does not resolve to a file in the extension package"
         )
     return candidate
+
+
+def resolve_panel_icon(
+    manifest: CanvasExtensionManifest, panel_id: str, package_root: Path
+) -> Path | None:
+    """The contained icon file of a panel; None for no such panel or no icon.
+
+    Raises:
+        ValueError: The declared icon escapes the package, or does not resolve
+            to a regular .svg or .png file.
+    """
+    for panel in manifest.contributes.conversation_panels:
+        if panel.id == panel_id and panel.icon is not None:
+            icon = resolve_package_file(package_root, panel.icon, "panel icon")
+            if icon.suffix not in PANEL_ICON_MEDIA_TYPES:
+                raise ValueError(
+                    f"panel icon {panel.icon!r} does not resolve to a .svg or .png file"
+                )
+            return icon
+    return None

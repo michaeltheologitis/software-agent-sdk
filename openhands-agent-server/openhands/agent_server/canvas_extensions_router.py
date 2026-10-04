@@ -26,6 +26,7 @@ from openhands.agent_server.canvas_extensions.installed import (
     disable_canvas_extension,
     enable_canvas_extension,
     get_canvas_extension_bundle_path,
+    get_canvas_extension_panel_icon_path,
     get_installed_canvas_extension,
     get_installed_canvas_extension_manifest,
     install_canvas_extension,
@@ -34,6 +35,7 @@ from openhands.agent_server.canvas_extensions.installed import (
 )
 from openhands.agent_server.canvas_extensions.manifest import (
     MANIFEST_FILENAME,
+    PANEL_ICON_MEDIA_TYPES,
     CanvasExtensionManifest,
 )
 from openhands.sdk.extensions.fetch import ExtensionFetchError
@@ -56,6 +58,21 @@ CanvasExtensionNamePath = Annotated[
         description="Canvas extension name (lowercase alphanumeric, hyphens)",
     ),
 ]
+CanvasExtensionContributionIdPath = Annotated[
+    str,
+    Path(
+        min_length=1,
+        max_length=255,
+        pattern=CANVAS_EXTENSION_NAME_PATTERN,
+        description="Contribution id (lowercase alphanumeric, hyphens)",
+    ),
+]
+# An SVG opened directly must not run script in the agent-server's origin.
+_PANEL_ICON_HEADERS: Final[dict[str, str]] = {
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 def _backend_manager(request: Request) -> CanvasExtensionBackendManager:
@@ -437,3 +454,37 @@ def get_canvas_extension_bundle_endpoint(
             detail=f"Canvas extension '{extension_name}' bundle not found",
         )
     return FileResponse(bundle_path, headers={"Cache-Control": "no-cache"})
+
+
+@canvas_extensions_router.get(
+    "/installed/{extension_name}/panels/{panel_id}/icon",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {
+                media_type: {"schema": {"type": "string", "format": "binary"}}
+                for media_type in PANEL_ICON_MEDIA_TYPES.values()
+            }
+        },
+        404: {"description": "Canvas extension, panel or icon not found"},
+    },
+)
+def get_canvas_extension_panel_icon_endpoint(
+    extension_name: CanvasExtensionNamePath, panel_id: CanvasExtensionContributionIdPath
+) -> FileResponse:
+    """Serve a conversation panel's icon, re-validating containment.
+
+    Served for an installed extension whether or not it is enabled, like the
+    bundle. Fetch it with the session key, as the bundle is fetched.
+    """
+    icon_path = get_canvas_extension_panel_icon_path(extension_name, panel_id)
+    if icon_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Canvas extension '{extension_name}' panel icon not found",
+        )
+    return FileResponse(
+        icon_path,
+        media_type=PANEL_ICON_MEDIA_TYPES[icon_path.suffix],
+        headers=_PANEL_ICON_HEADERS,
+    )
