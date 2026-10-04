@@ -37,6 +37,13 @@ import {
 import { IConversation, BaseConversationOptions } from './base';
 import { Success } from '../types/base';
 import type { HookConfig } from '../hooks';
+import {
+  ACP_SESSION_CONTROLS_EVENT_KIND,
+  type ACPConfigOptionSetResponse,
+  type ACPSessionControls,
+} from '../models/acp-session-controls';
+import { acpSessionControlsOf } from '../events/types';
+import type { EventPage } from '../types/base';
 
 /**
  * Options for creating a RemoteConversation instance.
@@ -331,6 +338,30 @@ export class RemoteConversation implements IConversation {
    */
   async switchAcpModel(model: string): Promise<void> {
     await this.client.post(`/api/conversations/${this.id}/switch_acp_model`, { model });
+  }
+
+  /**
+   * Set an ACP session config option on this conversation: live, or kept for
+   * the session's start. A refusal is a 422 whose `detail` is the agent's words.
+   */
+  async setAcpConfigOption(
+    configId: string,
+    value: string | boolean
+  ): Promise<ACPConfigOptionSetResponse> {
+    const response = await this.client.post<ACPConfigOptionSetResponse>(
+      `/api/conversations/${this.id}/acp/config-options`,
+      { config_id: configId, value }
+    );
+    return response.data;
+  }
+
+  /** The commands and options the conversation's ACP session offers now. */
+  async getAcpSessionControls(): Promise<ACPSessionControls> {
+    const response = await this.client.get<EventPage>(
+      `/api/conversations/${this.id}/events/search`,
+      { params: { kind: ACP_SESSION_CONTROLS_EVENT_KIND, sort_order: 'TIMESTAMP_DESC', limit: 1 } }
+    );
+    return acpSessionControlsOf(response.data.items);
   }
 
   /**

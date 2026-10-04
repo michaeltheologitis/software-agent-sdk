@@ -1,4 +1,12 @@
-import { Conversation, Agent, Workspace, RemoteConversation, RemoteWorkspace } from '../index';
+import {
+  Conversation,
+  Agent,
+  Workspace,
+  RemoteConversation,
+  RemoteWorkspace,
+  ACP_SESSION_CONTROLS_EVENT_KIND,
+  isACPSessionControlsEvent,
+} from '../index';
 
 describe('OpenHands Agent Server TypeScript Client', () => {
   describe('Exports', () => {
@@ -25,6 +33,13 @@ describe('OpenHands Agent Server TypeScript Client', () => {
     it('should export RemoteWorkspace for backwards compatibility', () => {
       expect(RemoteWorkspace).toBeDefined();
       expect(typeof RemoteWorkspace).toBe('function');
+    });
+
+    it('should export the ACP session controls helpers from the package root', () => {
+      expect(typeof isACPSessionControlsEvent).toBe('function');
+      expect(ACP_SESSION_CONTROLS_EVENT_KIND).toBe(
+        'openhands.sdk.event.acp_session_controls.ACPSessionControlsEvent'
+      );
     });
   });
 

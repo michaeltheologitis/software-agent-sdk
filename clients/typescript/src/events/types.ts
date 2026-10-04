@@ -29,6 +29,11 @@ import type {
   ToolDefinition as AgentServerToolDefinition,
   UserRejectObservation as AgentServerUserRejectObservation,
 } from '../generated/agent-server-schema';
+import type {
+  ACPAvailableCommand,
+  ACPConfigOption,
+  ACPSessionControls,
+} from '../models/acp-session-controls';
 
 export type ACPToolCallEvent = AgentServerAcpToolCallEvent;
 export type ACPToolCallStatus = NonNullable<ACPToolCallEvent['status']>;
@@ -166,6 +171,16 @@ export interface ThinkEvent extends BaseEvent {
 }
 
 /**
+ * ACP session controls event - the slash commands and config options an ACP
+ * session offers now. Latest wins: each event carries both lists in full.
+ */
+export interface ACPSessionControlsEvent extends BaseEvent {
+  kind: 'ACPSessionControlsEvent';
+  available_commands: ACPAvailableCommand[];
+  config_options: ACPConfigOption[];
+}
+
+/**
  * Union type of all conversation events
  */
 export type ConversationEvent =
@@ -174,7 +189,8 @@ export type ConversationEvent =
   | ConfirmationResponseEvent
   | StuckDetectionEvent
   | FinishEvent
-  | ThinkEvent;
+  | ThinkEvent
+  | ACPSessionControlsEvent;
 
 /**
  * Type guard to check if an event is a MessageEvent
@@ -236,6 +252,29 @@ export function isCondensationEvent(event: BaseEvent): event is CondensationEven
  */
 export function isHookExecutionEvent(event: BaseEvent): event is HookExecutionEvent {
   return event.kind === 'HookExecutionEvent';
+}
+
+/**
+ * Type guard to check if an event is an ACPSessionControlsEvent
+ */
+export function isACPSessionControlsEvent(event: BaseEvent): event is ACPSessionControlsEvent {
+  return event.kind === 'ACPSessionControlsEvent';
+}
+
+/**
+ * The lists of the first ACPSessionControlsEvent in `events`, or empty lists.
+ * Given a newest-first search page, that is the session's current state.
+ */
+export function acpSessionControlsOf(events: readonly BaseEvent[]): ACPSessionControls {
+  for (const event of events) {
+    if (isACPSessionControlsEvent(event)) {
+      return {
+        available_commands: event.available_commands,
+        config_options: event.config_options,
+      };
+    }
+  }
+  return { available_commands: [], config_options: [] };
 }
 
 /**

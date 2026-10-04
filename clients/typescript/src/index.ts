@@ -69,6 +69,7 @@ export {
   isConversationErrorEvent,
   isCondensationEvent,
   isHookExecutionEvent,
+  isACPSessionControlsEvent,
 } from './events/types';
 export type {
   EventID,
@@ -82,6 +83,7 @@ export type {
   ACPToolCallEvent,
   ACPToolCallStatus,
   ACPToolKind,
+  ACPSessionControlsEvent,
   StreamingDeltaEvent,
   SystemPromptEvent,
   PauseEvent,
@@ -222,6 +224,20 @@ export type {
 // ACP provider registry (mirrors openhands-sdk; see scripts/validate-acp-providers.mjs)
 export { ACP_PROVIDERS, ACP_SETTINGS_KEYS, getAcpProvider } from './models/acp';
 export type { ACPModelOption, ACPProviderInfo, ACPProviderKey } from './models/acp';
+
+// ACP session controls (mirrors openhands-sdk acp_models.py)
+export { ACP_SESSION_CONTROLS_EVENT_KIND } from './models/acp-session-controls';
+export type {
+  ACPAvailableCommand,
+  ACPCommandInput,
+  ACPConfigOption,
+  ACPConfigOptionSetRequest,
+  ACPConfigOptionSetResponse,
+  ACPConfigOptionType,
+  ACPConfigOptionValue,
+  ACPConfigOptionValues,
+  ACPSessionControls,
+} from './models/acp-session-controls';
 
 // Agent profile types (mirrors openhands-sdk agent_profile.py + resolver.py)
 export type {
