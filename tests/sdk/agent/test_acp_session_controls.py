@@ -425,10 +425,20 @@ def test_after_a_fallback_to_a_fresh_session_every_value_is_reapplied(
 # -- The model option ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("config_id", ["model", ""])
-def test_the_model_option_and_an_empty_id_are_refused_in_the_field(config_id):
-    with pytest.raises(ValidationError):
+@pytest.mark.parametrize(
+    "config_id, sentence",
+    [
+        ("model", "The 'model' option is set with switch_acp_model"),
+        ("", "config_id must be a non-empty string"),
+    ],
+)
+def test_the_model_option_and_an_empty_id_are_refused_in_the_field_and_by_a_live_set(
+    start, config_id, sentence
+):
+    with pytest.raises(ValidationError, match=sentence):
         ACPAgent(acp_command=["unused"], acp_config_options={config_id: "x"})
+    with pytest.raises(ValueError, match=sentence):
+        start().agent.set_acp_config_option(config_id, "x")
 
 
 def test_a_model_switch_through_set_config_option_updates_the_published_model():
