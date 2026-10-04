@@ -712,10 +712,16 @@ def test_scripted_run_books_only_the_roots_cost(conversation):
     )
 
 
+@pytest.mark.parametrize("mode", ["--subagents", "--transcript"])
 def test_subagents_off_stores_only_root_work_through_the_stock_connection(
-    conversation, acp_request_log
+    conversation, acp_request_log, tmp_path, mode
 ):
-    conv = conversation("--subagents", acp_subagents=False)
+    flags = (
+        ("--subagents",)
+        if mode == "--subagents"
+        else ("--transcript", str(write_lines(tmp_path, outgoing_only(recorded_run()))))
+    )
+    conv = conversation(*flags, acp_subagents=False)
 
     events = run(conv)
 
