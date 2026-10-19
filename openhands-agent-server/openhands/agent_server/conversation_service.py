@@ -15,6 +15,7 @@ from weakref import WeakValueDictionary
 import httpx
 from pydantic import BaseModel
 
+from openhands.agent_server import persistence
 from openhands.agent_server.agent_profiles_router import llm_has_real_config
 from openhands.agent_server.config import ACPSkillSourcing, Config, WebhookSpec
 from openhands.agent_server.conversation_lease import (
@@ -48,11 +49,7 @@ from openhands.agent_server.models import (
     StoredConversation,
     UpdateConversationRequest,
 )
-from openhands.agent_server.persistence import (
-    FileSecretsStore,
-    PersistedSettings,
-    get_settings_store,
-)
+from openhands.agent_server.persistence import FileSecretsStore, PersistedSettings
 from openhands.agent_server.pub_sub import Subscriber
 from openhands.agent_server.server_details_router import update_last_execution_time
 from openhands.agent_server.telemetry import (
@@ -283,7 +280,7 @@ async def _load_launch_settings() -> PersistedSettings:
     # request shapes that need nothing from settings.
     try:
         return await asyncio.to_thread(
-            lambda: get_settings_store().load() or PersistedSettings()
+            lambda: persistence.get_settings_store().load() or PersistedSettings()
         )
     except (PermissionError, OSError):
         logger.warning(
