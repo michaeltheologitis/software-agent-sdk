@@ -128,11 +128,12 @@ def test_legacy_server_receives_the_initial_model(
         agent.close()
 
 
+@pytest.mark.parametrize("acp_subagents", [False, True])
 def test_legacy_server_switches_models_at_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, acp_subagents: bool
 ) -> None:
     monkeypatch.setenv("FAKE_ACP_MODELS", "legacy")
-    agent = ACPAgent(acp_command=FAKE_COMMAND)
+    agent = ACPAgent(acp_command=FAKE_COMMAND, acp_subagents=acp_subagents)
     try:
         _start(agent, tmp_path)
         agent.set_acp_model("m2")
