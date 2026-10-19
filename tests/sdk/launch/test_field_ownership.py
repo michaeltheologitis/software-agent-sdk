@@ -146,6 +146,7 @@ ACP_FIELDS: dict[str, Any] = {
     "acp_session_mode": PROFILE,
     "acp_prompt_timeout": PROFILE,
     "acp_startup_timeout": PROFILE,
+    "acp_subagents": PROFILE,
     "mcp_config": Reference("mcp_server_refs"),
     "acp_isolate_data_dir": NotOnProfile(
         "set by the deploying application when conversations share a sandbox"
@@ -264,6 +265,7 @@ def _non_default_acp_profile() -> ACPAgentProfile:
         acp_startup_timeout=34.0,
         acp_command="codex-acp --flag",
         acp_args=["--x"],
+        acp_subagents=True,
     )
 
 
