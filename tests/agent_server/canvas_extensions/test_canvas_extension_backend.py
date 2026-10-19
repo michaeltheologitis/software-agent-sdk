@@ -816,6 +816,10 @@ def _alive(pid: int) -> bool:
 
 
 @requires_linux_backend
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="orphan reaping identifies a backend by its /proc start time",
+)
 @pytest.mark.asyncio
 async def test_restart_after_server_crash_reaps_orphaned_backend(tmp_path: Path):
     """A SIGKILLed server's backend must not survive the next server (#5637)."""
