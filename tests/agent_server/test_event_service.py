@@ -1025,6 +1025,29 @@ class TestEventServiceSendMessage:
         assert prompts_seen == ["initial request", "intervening"]
 
     @pytest.mark.asyncio
+    async def test_send_message_after_interrupt_does_not_resend_the_stopped_acp_prompt(
+        self, event_service, scripted_conversation, acp_prompts_first_blocks
+    ):
+        """A message sent after an explicit interrupt is the next ACP prompt."""
+        prompts_seen, first_prompt_started = acp_prompts_first_blocks
+        conversation = scripted_conversation()
+        conversation.send_message("stop me")
+        event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
+
+        await event_service.run()
+        await asyncio.wait_for(first_prompt_started.wait(), timeout=1.0)
+        await event_service.interrupt()
+        await event_service.send_message(
+            Message(role="user", content=[TextContent(text="not that one")]),
+            run=True,
+        )
+        status = await event_service.wait_for_run_completion(timeout=1.0)
+
+        assert status == ConversationExecutionStatus.FINISHED
+        assert prompts_seen == ["stop me", "not that one"]
+
+    @pytest.mark.asyncio
     async def test_send_message_with_run_true_does_not_interrupt_current_acp_prompt(
         self, event_service, tmp_path
     ):

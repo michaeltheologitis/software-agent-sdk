@@ -122,6 +122,7 @@ logger = get_logger(__name__)
 ACP_LAST_PROMPT_USER_MESSAGE_ID = "acp_last_prompt_user_message_id"
 ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID = "acp_inflight_prompt_user_message_id"
 ACP_SUPERSEDE_INFLIGHT_PROMPT = "acp_supersede_inflight_prompt"
+ACP_RETRYABLE_PROMPT_USER_MESSAGE_ID = "acp_retryable_prompt_user_message_id"
 _RUNTIME_MCP_TIMEOUT_SECS = 30
 
 ACP_STOP_HOOK_FEEDBACK_PREFIX = "[Stop hook feedback]"
@@ -721,6 +722,28 @@ class LocalConversation(BaseConversation):
             if _is_acp_prompt_message(event)
         ]
         return acp_prompt_messages[-1].id if acp_prompt_messages else None
+
+    def _supersede_retryable_acp_prompt(self) -> None:
+        """Supersede the prompt a cancelled run left retryable once a newer one follows.
+
+        Until one does, the run retries it. Call with the state lock held.
+        """
+        if ACP_RETRYABLE_PROMPT_USER_MESSAGE_ID not in self._state.agent_state:
+            return
+        updated_agent_state = dict(self._state.agent_state)
+        retryable_prompt_user_message_id = updated_agent_state.pop(
+            ACP_RETRYABLE_PROMPT_USER_MESSAGE_ID
+        )
+        acp_prompt_message_ids = [
+            event.id
+            for event in self._state.active_branch()
+            if _is_acp_prompt_message(event)
+        ]
+        if retryable_prompt_user_message_id in acp_prompt_message_ids[:-1]:
+            updated_agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
+                retryable_prompt_user_message_id
+            )
+        self._state.agent_state = updated_agent_state
 
     def _budget_exceeded_detail(self) -> str | None:
         """Error detail if the run has hit its cost budget, else None.
@@ -2226,6 +2249,9 @@ class LocalConversation(BaseConversation):
                     updated_agent_state.pop(ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID, None)
                     self._state.agent_state = updated_agent_state
 
+            if isinstance(self.agent, ACPAgent):
+                self._supersede_retryable_acp_prompt()
+
             if self._state.execution_status in [
                 ConversationExecutionStatus.IDLE,
                 ConversationExecutionStatus.PAUSED,
@@ -2633,12 +2659,15 @@ class LocalConversation(BaseConversation):
                 completed_cancelled_prompt = (
                     self._state.execution_status == ConversationExecutionStatus.FINISHED
                 )
-                if (
-                    superseded_by_new_message or completed_cancelled_prompt
-                ) and inflight_prompt_user_message_id is not None:
-                    updated_agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
-                        inflight_prompt_user_message_id
-                    )
+                if inflight_prompt_user_message_id is not None:
+                    if superseded_by_new_message or completed_cancelled_prompt:
+                        updated_agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
+                            inflight_prompt_user_message_id
+                        )
+                    else:
+                        updated_agent_state[ACP_RETRYABLE_PROMPT_USER_MESSAGE_ID] = (
+                            inflight_prompt_user_message_id
+                        )
                 self._state.agent_state = updated_agent_state
 
                 # Emit synthetic error observations for any ActionEvents
