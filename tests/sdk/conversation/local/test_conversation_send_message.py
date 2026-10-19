@@ -715,6 +715,66 @@ async def test_acp_arun_commits_cursor_when_cancelled_prompt_completed(tmp_path)
     assert prompts_seen == ["complete during cancel"]
 
 
+async def _arun_and_interrupt_first_prompt(
+    conversation: LocalConversation, first_prompt_started: asyncio.Event
+) -> None:
+    run = asyncio.create_task(conversation.arun())
+    await asyncio.wait_for(first_prompt_started.wait(), timeout=1.0)
+    conversation.interrupt()
+    await asyncio.wait_for(run, timeout=1.0)
+    assert conversation.state.execution_status == ConversationExecutionStatus.PAUSED
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_passes_over_a_stopped_prompt_once_a_newer_message_follows(
+    scripted_conversation, acp_prompts_first_blocks
+):
+    """A message sent after an interrupt supersedes the stopped prompt."""
+    prompts_seen, first_prompt_started = acp_prompts_first_blocks
+    conversation = scripted_conversation()
+    conversation.send_message("stop me")
+    await _arun_and_interrupt_first_prompt(conversation, first_prompt_started)
+
+    conversation.send_message("not that one")
+    await asyncio.wait_for(conversation.arun(), timeout=1.0)
+
+    assert prompts_seen == ["stop me", "not that one"]
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_retries_a_stopped_prompt_while_no_newer_message_follows(
+    scripted_conversation, acp_prompts_first_blocks
+):
+    """Resuming with nothing new retries the stopped prompt, once."""
+    prompts_seen, first_prompt_started = acp_prompts_first_blocks
+    conversation = scripted_conversation()
+    conversation.send_message("stop me")
+    await _arun_and_interrupt_first_prompt(conversation, first_prompt_started)
+
+    await asyncio.wait_for(conversation.arun(), timeout=1.0)
+    conversation.send_message("next")
+    await asyncio.wait_for(conversation.arun(), timeout=1.0)
+
+    assert prompts_seen == ["stop me", "stop me", "next"]
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_passes_over_a_stopped_prompt_after_a_reload_from_disk(
+    scripted_conversation, acp_prompts_first_blocks
+):
+    """A stop persists: after a relaunch, a newer message supersedes the prompt."""
+    prompts_seen, first_prompt_started = acp_prompts_first_blocks
+    conversation = scripted_conversation()
+    conversation.send_message("stop me")
+    await _arun_and_interrupt_first_prompt(conversation, first_prompt_started)
+
+    reloaded = scripted_conversation(conversation_id=conversation.id)
+    reloaded.send_message("after the relaunch")
+    await asyncio.wait_for(reloaded.arun(), timeout=1.0)
+
+    assert prompts_seen == ["stop me", "after the relaunch"]
+
+
 @pytest.mark.asyncio
 async def test_acp_arun_resumes_queued_messages_fifo_after_iteration_cap(tmp_path):
     """Queued ACP messages should remain FIFO across follow-up runs."""

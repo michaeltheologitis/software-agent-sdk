@@ -1,5 +1,6 @@
 """Common test fixtures and utilities."""
 
+import asyncio
 import json
 import sys
 import time
@@ -7,7 +8,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -15,10 +16,22 @@ from pydantic import SecretStr
 from openhands.sdk import Agent
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.conversation import LocalConversation
-from openhands.sdk.conversation.state import ConversationState
-from openhands.sdk.event import ACPSessionControlsEvent, ACPSubagentEvent, Event
+from openhands.sdk.conversation.state import (
+    ConversationExecutionStatus,
+    ConversationState,
+)
+from openhands.sdk.conversation.types import (
+    ConversationCallbackType,
+    ConversationTokenCallbackType,
+)
+from openhands.sdk.event import (
+    ACPSessionControlsEvent,
+    ACPSubagentEvent,
+    Event,
+    MessageEvent,
+)
 from openhands.sdk.io import InMemoryFileStore
-from openhands.sdk.llm import LLM
+from openhands.sdk.llm import LLM, TextContent
 from openhands.sdk.tool import ToolExecutor
 from openhands.sdk.workspace import LocalWorkspace
 
@@ -139,6 +152,40 @@ def controls_events(events: Iterable[Event]) -> list[ACPSessionControlsEvent]:
 def subagent_snapshots(events: Iterable[Event]) -> dict[str, ACPSubagentEvent]:
     """The latest ACPSubagentEvent of each child session among ``events``."""
     return {e.acp_session_id: e for e in events if isinstance(e, ACPSubagentEvent)}
+
+
+@pytest.fixture
+def acp_prompts_first_blocks() -> Iterator[tuple[list[str], asyncio.Event]]:
+    """Stub ACPAgent so no ACP process starts; record each prompt's text.
+
+    ``init_state`` and ``astep`` are patched, so an agent's ``acp_command`` never
+    runs. The first prompt blocks until it is cancelled. Yields the recorded texts
+    and the event set once that prompt is in flight.
+    """
+    prompts_seen: list[str] = []
+    first_prompt_started = asyncio.Event()
+
+    async def astep(
+        self,
+        conv: LocalConversation,
+        on_event: ConversationCallbackType,
+        on_token: ConversationTokenCallbackType | None = None,
+        prompt_message: MessageEvent | None = None,
+    ) -> None:
+        assert prompt_message is not None
+        content = prompt_message.llm_message.content[0]
+        assert isinstance(content, TextContent)
+        prompts_seen.append(content.text)
+        if len(prompts_seen) == 1:
+            first_prompt_started.set()
+            await asyncio.Event().wait()
+        conv.state.execution_status = ConversationExecutionStatus.FINISHED
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=astep),
+    ):
+        yield prompts_seen, first_prompt_started
 
 
 def wait_until(condition: Callable[[], Any], timeout: float = 10.0) -> Any:
