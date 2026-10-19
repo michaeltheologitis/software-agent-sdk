@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from acp.client.connection import ClientSideConnection
 from acp.schema import ClientCapabilities, InitializeRequest, SessionNotification
 from acp.utils import serialize_params
 
@@ -38,6 +37,7 @@ from openhands.sdk.agent.acp_subagents import (
 from openhands.sdk.agent.acp_unstable import (
     SessionMessage,
     SessionMessageChunk,
+    SubagentClientSideConnection,
     SubagentUpdate,
 )
 from openhands.sdk.conversation import LocalConversation
@@ -726,7 +726,7 @@ def test_subagents_off_stores_only_root_work_through_the_stock_connection(
 
     events = run(conv)
 
-    assert type(conv.agent._conn) is ClientSideConnection
+    assert not isinstance(conv.agent._conn, SubagentClientSideConnection)
     [initialize] = [e for e in acp_request_log() if e["method"] == "initialize"]
     library_call = InitializeRequest(
         protocol_version=1, client_capabilities=ClientCapabilities()

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import re
 import sys
 import time
 import uuid
@@ -47,6 +49,21 @@ SCRIPTED_ACP_AGENT = REPO_ROOT / "tests" / "fixtures" / "acp" / "scripted_agent.
 def scripted_acp_command(*flags: str) -> list[str]:
     """The ``acp_command`` that runs the scripted ACP test agent with ``flags``."""
     return [sys.executable, str(SCRIPTED_ACP_AGENT), *flags]
+
+
+# Settings that point an agent server at, or authenticate it to, a live
+# deployment. A run inside an OpenHands sandbox inherits them from the sandbox.
+_LIVE_DEPLOYMENT_ENV = re.compile(
+    r"SESSION_API_KEY|OH_SESSION_API_KEYS_\d+|OH_WEBHOOKS(_\w+)?"
+    r"|OH_CONVERSATIONS_PATH|OH_BASH_EVENTS_DIR|OH_INTERNAL_SERVER_URL"
+    r"|OH_LLM_API_KEY_REFRESH_\w+"
+)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # Before collection: some modules read the agent-server config at import.
+    for name in [n for n in os.environ if _LIVE_DEPLOYMENT_ENV.fullmatch(n)]:
+        del os.environ[name]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

@@ -15,6 +15,7 @@ from openhands.agent_server.conversation_router import conversation_router
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.dependencies import get_conversation_service
 from openhands.agent_server.event_service import EventService
+from openhands.agent_server.launch import launch_source
 from openhands.agent_server.models import (
     ConversationInfo,
     ConversationPage,
@@ -27,7 +28,9 @@ from openhands.agent_server.models import (
 from openhands.agent_server.utils import utc_now
 from openhands.sdk import LLM, Agent, TextContent, Tool
 from openhands.sdk.agent.acp_agent import ACPAgent
+from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.launch import LaunchRuntime, LaunchStores, finalize
 from openhands.sdk.llm import llm_profile_store
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.marketplace.registry import (
@@ -489,18 +492,28 @@ def test_batch_get_conversations_too_many_ids(client, mock_conversation_service)
     )
 
     try:
-        # The assertion is len(ids) < 100, so 100 should fail with AssertionError
+        # 100 ids exceed the 99-id limit: a 422 naming the limit, not a 500
         many_ids = [str(uuid4()) for _ in range(100)]
-        with pytest.raises(AssertionError):
-            response = client.get("/api/conversations", params={"ids": many_ids})
+        response = client.get("/api/conversations", params={"ids": many_ids})
+        assert response.status_code == 422
+        assert "at most 99 items" in response.text
+        mock_conversation_service.batch_get_conversations.assert_not_called()
 
         # Test with 99 IDs (should work)
         mock_conversation_service.batch_get_conversations.return_value = [None] * 99
         valid_ids = [str(uuid4()) for _ in range(99)]
         response = client.get("/api/conversations", params={"ids": valid_ids})
         assert response.status_code == 200
+        assert response.json() == [None] * 99
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_batch_get_conversations_openapi_declares_id_limit(client):
+    """The 99-id limit is part of the published schema, not only enforced."""
+    operation = client.app.openapi()["paths"]["/api/conversations"]["get"]
+    ids_param = next(p for p in operation["parameters"] if p["name"] == "ids")
+    assert ids_param["schema"]["maxItems"] == 99
 
 
 def test_batch_get_conversations_invalid_uuid(client, mock_conversation_service):
@@ -565,6 +578,92 @@ def test_start_conversation_new(
         client.app.dependency_overrides.clear()
 
 
+def test_start_conversation_merges_observability_headers(
+    client, mock_conversation_service, sample_conversation_info
+):
+    mock_conversation_service.start_conversation.return_value = (
+        sample_conversation_info,
+        True,
+    )
+    client.app.dependency_overrides[get_conversation_service] = lambda: (
+        mock_conversation_service
+    )
+    try:
+        request_data = {
+            "agent": {
+                "kind": "Agent",
+                "llm": {"model": "gpt-4o", "api_key": "test-key"},
+                "tools": [{"name": "TerminalTool"}],
+            },
+            "workspace": {"working_dir": "/tmp/test"},
+            "observability_metadata": {"caller": "body"},
+        }
+
+        response = client.post(
+            "/api/conversations",
+            json=request_data,
+            headers={
+                "X-OpenHands-Observability-Metadata": (
+                    '{"automation.id":"a1","caller":"header"}'
+                ),
+                "X-OpenHands-Observability-Span-Name": "automation.conversation",
+                "X-OpenHands-Observability-Tags": "automation,webhook",
+                "X-OpenHands-Observability-Parent-Span-Context": "parent-context",
+            },
+        )
+
+        assert response.status_code == 201
+        request = mock_conversation_service.start_conversation.call_args.args[0]
+        assert request.observability_metadata == {
+            "automation.id": "a1",
+            "caller": "body",
+        }
+        assert request.observability_span_name == "automation.conversation"
+        assert request.observability_tags == ["automation", "webhook"]
+        assert request.observability_parent_span_context == "parent-context"
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_start_conversation_body_observability_overrides_headers(
+    client, mock_conversation_service, sample_conversation_info
+):
+    mock_conversation_service.start_conversation.return_value = (
+        sample_conversation_info,
+        True,
+    )
+    client.app.dependency_overrides[get_conversation_service] = lambda: (
+        mock_conversation_service
+    )
+    try:
+        request_data = {
+            "agent": {
+                "kind": "Agent",
+                "llm": {"model": "gpt-4o", "api_key": "test-key"},
+                "tools": [{"name": "TerminalTool"}],
+            },
+            "workspace": {"working_dir": "/tmp/test"},
+            "observability_span_name": "body.span",
+            "observability_tags": ["body_tag"],
+        }
+
+        response = client.post(
+            "/api/conversations",
+            json=request_data,
+            headers={
+                "X-OpenHands-Observability-Span-Name": "header.span",
+                "X-OpenHands-Observability-Tags": "header_tag",
+            },
+        )
+
+        assert response.status_code == 201
+        request = mock_conversation_service.start_conversation.call_args.args[0]
+        assert request.observability_span_name == "body.span"
+        assert request.observability_tags == ["body_tag"]
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 def test_start_conversation_existing(
     client, mock_conversation_service, sample_conversation_info
 ):
@@ -607,6 +706,15 @@ def test_start_conversation_existing(
         client.app.dependency_overrides.clear()
 
 
+def _launched_agent(request: StartConversationRequest) -> AgentBase:
+    def no_stores() -> LaunchStores:
+        raise AssertionError("an agent_settings launch reads no store")
+
+    return finalize(
+        launch_source(request, no_stores, None), LaunchRuntime(browser_available=True)
+    ).agent
+
+
 def test_start_conversation_accepts_openhands_agent_settings(
     client, mock_conversation_service
 ):
@@ -645,9 +753,13 @@ def test_start_conversation_accepts_openhands_agent_settings(
 
         assert response.status_code == 201
         request = mock_conversation_service.start_conversation.call_args.args[0]
-        assert request.agent.kind == "Agent"
-        assert request.agent.llm.model == "settings-model"
-        assert "agent_settings" not in request.model_dump(mode="json")
+        assert request.agent is None
+        assert (
+            request.model_dump(mode="json")["agent_settings"] == request.agent_settings
+        )
+        agent = _launched_agent(request)
+        assert agent.kind == "Agent"
+        assert agent.llm.model == "settings-model"
     finally:
         client.app.dependency_overrides.clear()
 
@@ -699,8 +811,9 @@ def test_start_conversation_agent_settings_uses_sdk_default_tools(
 
         assert response.status_code == 201
         request = mock_conversation_service.start_conversation.call_args.args[0]
-        assert "SwitchLLMTool" in request.agent.include_default_tools
-        assert {tool.name for tool in request.agent.tools} == {
+        agent = _launched_agent(request)
+        assert "SwitchLLMTool" in agent.include_default_tools
+        assert {tool.name for tool in agent.tools} == {
             "terminal",
             "file_editor",
             "task_tracker",
@@ -783,12 +896,13 @@ def test_start_conversation_accepts_acp_agent_settings(
 
         assert response.status_code == 201
         request = mock_conversation_service.start_conversation.call_args.args[0]
-        assert request.agent.kind == "ACPAgent"
-        assert request.agent.acp_command == ["echo", "settings"]
-        assert request.agent.acp_args == ["--verbose"]
-        assert request.agent.acp_model == "acp-test-model"
-        assert request.agent.acp_session_mode == "bypassPermissions"
-        assert request.agent.acp_prompt_timeout == 123.0
+        agent = _launched_agent(request)
+        assert isinstance(agent, ACPAgent)
+        assert agent.acp_command == ["echo", "settings"]
+        assert agent.acp_args == ["--verbose"]
+        assert agent.acp_model == "acp-test-model"
+        assert agent.acp_session_mode == "bypassPermissions"
+        assert agent.acp_prompt_timeout == 123.0
 
     finally:
         client.app.dependency_overrides.clear()
@@ -1729,6 +1843,27 @@ def test_update_conversation_invalid_title(
             f"/api/conversations/{sample_conversation_id}", json=request_data
         )
         assert response.status_code == 422  # Validation error
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("title", ["   ", "\t\n"])
+def test_update_conversation_whitespace_only_title_rejected(
+    client, mock_conversation_service, sample_conversation_id, title
+):
+    """A whitespace-only title is rejected like an empty one (422) and the
+    service is never called, so the stored title is kept."""
+
+    client.app.dependency_overrides[get_conversation_service] = lambda: (
+        mock_conversation_service
+    )
+
+    try:
+        response = client.patch(
+            f"/api/conversations/{sample_conversation_id}", json={"title": title}
+        )
+        assert response.status_code == 422
+        mock_conversation_service.update_conversation.assert_not_called()
     finally:
         client.app.dependency_overrides.clear()
 
@@ -2887,6 +3022,28 @@ def test_navigate_conversation_success(
         client.app.dependency_overrides.clear()
 
 
+def test_ask_agent_unknown_conversation_returns_404(
+    client, mock_conversation_service, sample_conversation_id
+):
+    """ask_agent returns 404, not 500, when the conversation does not exist."""
+    mock_conversation_service.ask_agent.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = lambda: (
+        mock_conversation_service
+    )
+
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/ask_agent",
+            json={"question": "hi"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Conversation not found"
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 @pytest.mark.parametrize("failure_mode", ["missing_conversation", "unknown_event"])
 def test_navigate_conversation_returns_404(
     client, mock_conversation_service, sample_conversation_id, failure_mode
@@ -2946,6 +3103,38 @@ def test_start_conversation_client_tool_registration_error_returns_422(
 
         assert response.status_code == 422
         assert "collides with an existing non-client tool" in response.json()["detail"]
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_start_conversation_unavailable_agent_tool_returns_422(
+    client, mock_conversation_service
+):
+    """An agent tool whose module the server cannot import yields 422, not 500."""
+    from openhands.agent_server.conversation_service import UnavailableAgentTool
+
+    mock_conversation_service.start_conversation.side_effect = UnavailableAgentTool(
+        "The agent uses tools whose modules the agent server cannot import: "
+        "'qa_ghost_tool' (qa_ghost: No module named 'qa_ghost')"
+    )
+    client.app.dependency_overrides[get_conversation_service] = lambda: (
+        mock_conversation_service
+    )
+    request = StartConversationRequest(
+        agent=Agent(
+            llm=LLM(model="gpt-4o", api_key=SecretStr("test-key"), usage_id="t"),
+            tools=[],
+        ),
+        workspace=LocalWorkspace(working_dir="/tmp/test"),
+    )
+
+    try:
+        response = client.post(
+            "/api/conversations", json=request.model_dump(mode="json")
+        )
+
+        assert response.status_code == 422
+        assert "'qa_ghost_tool'" in response.json()["detail"]
     finally:
         client.app.dependency_overrides.clear()
 
