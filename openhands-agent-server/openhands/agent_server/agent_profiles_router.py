@@ -108,7 +108,7 @@ class RenameAgentProfileRequest(BaseModel):
     )
 
 
-def _llm_has_real_config(llm: LLM) -> bool:
+def llm_has_real_config(llm: LLM) -> bool:
     """True when ``llm`` carries real, user-provided configuration.
 
     Distinguishes an already-working setup — a real API key, subscription auth,
@@ -138,7 +138,7 @@ def _seed_default_llm_profile(llm: LLM, cipher: Cipher | None) -> str:
     ``agent_settings.llm`` under that name so the reference resolves, unless a
     profile is already stored there (never clobber it).
 
-    Only a *real, pre-existing* LLM config is persisted (``_llm_has_real_config``
+    Only a *real, pre-existing* LLM config is persisted (``llm_has_real_config``
     — an API key, subscription auth, or a custom base_url), which is exactly the
     legacy/cloud migration case the backfill exists for. On a fresh,
     never-configured account the live LLM is untouched SDK defaults (keyless
@@ -172,7 +172,7 @@ def _seed_default_llm_profile(llm: LLM, cipher: Cipher | None) -> str:
                 "failed to load; leaving it as-is"
             )
             return SEED_PROFILE_NAME
-        if not _llm_has_real_config(llm):
+        if not llm_has_real_config(llm):
             # Never-configured account: don't persist a keyless ghost profile.
             # Leave the ref soft/dangling; the banner + launch-time error handle
             # it, and it resolves for real once the user saves a profile.

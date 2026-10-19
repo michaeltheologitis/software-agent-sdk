@@ -3330,7 +3330,9 @@ class TestAutoTitle:
     async def test_autotitle_uses_llm_profile_when_configured(self):
         """Profile LLM takes precedence over agent.llm when configured."""
         service = self._make_service(title_llm_profile="cheap-model")
-        mock_llm = LLM(model="gpt-3.5-turbo", usage_id="title-llm")
+        mock_llm = LLM(
+            model="gpt-3.5-turbo", usage_id="title-llm", api_key=SecretStr("title-key")
+        )
 
         with (
             patch(
@@ -3465,7 +3467,9 @@ class TestAutoTitle:
     async def test_autotitle_uses_title_profile_for_settings_built_acp_agent(self):
         service = self._make_service(title_llm_profile="cheap-model")
         service._conversation.agent.llm = ACPAgentSettings().create_agent().llm
-        profile_llm = LLM(model="gpt-3.5-turbo", usage_id="title-llm")
+        profile_llm = LLM(
+            model="gpt-3.5-turbo", usage_id="title-llm", api_key=SecretStr("title-key")
+        )
 
         with (
             patch(
@@ -3482,6 +3486,67 @@ class TestAutoTitle:
 
         assert mock_llm_title.call_args.args[1] is profile_llm
         assert service.stored.title == "Profile Title"
+
+    @pytest.mark.asyncio
+    async def test_autotitle_skips_a_title_profile_without_a_credential(self):
+        """A title profile with no key, subscription or endpoint is never
+        called, so its certain auth failure never reaches the UI; the title
+        falls back to the agent's LLM, here the ACP sentinel, then truncation."""
+        service = self._make_service(
+            title_llm_profile="gpt-5-5", llm_usage_id="acp-managed"
+        )
+        keyless_llm = LLM(model="gpt-5.5", usage_id="gpt-5-5")
+
+        with (
+            patch(
+                "openhands.agent_server.persistence.store.get_llm_profile_store"
+            ) as MockStore,
+            patch(
+                "openhands.sdk.llm.llm.LLM.generate",
+                side_effect=Exception("Incorrect API key provided: None"),
+            ) as mock_generate,
+        ):
+            MockStore.return_value.load.return_value = keyless_llm
+            subscriber = AutoTitleSubscriber(service=service)
+            await subscriber(self._user_message_event("What is 2 + 2?"))
+            await self._drain_title_task(lambda: service.stored.title is not None)
+
+        mock_generate.assert_not_called()
+        service._publish_error_event_sync.assert_not_called()
+        assert service.stored.title == "What is 2 + 2?"
+
+    @pytest.mark.asyncio
+    async def test_autotitle_still_surfaces_the_error_of_a_title_profile_with_a_key(
+        self,
+    ):
+        """A keyed title profile is still called, and its failure still reaches
+        the UI (issue #16686). The agent's LLM is the ACP sentinel, so only the
+        title profile can have made the failing call."""
+        service = self._make_service(
+            title_llm_profile="gpt-5-5", llm_usage_id="acp-managed"
+        )
+        keyed_llm = LLM(
+            model="gpt-5.5", usage_id="gpt-5-5", api_key=SecretStr("sk-wrong")
+        )
+
+        with (
+            patch(
+                "openhands.agent_server.persistence.store.get_llm_profile_store"
+            ) as MockStore,
+            patch(
+                "openhands.sdk.llm.llm.LLM.generate",
+                side_effect=Exception("Incorrect API key provided: sk-wrong"),
+            ),
+        ):
+            MockStore.return_value.load.return_value = keyed_llm
+            subscriber = AutoTitleSubscriber(service=service)
+            await subscriber(self._user_message_event("What is 2 + 2?"))
+            await self._drain_title_task(lambda: service.stored.title is not None)
+
+        service._publish_error_event_sync.assert_called_once()
+        (exc,) = service._publish_error_event_sync.call_args.args
+        assert str(exc) == "Incorrect API key provided: sk-wrong"
+        assert service.stored.title == "What is 2 + 2?"
 
     @pytest.mark.asyncio
     async def test_autotitle_integration_routes_through_profile_store(
@@ -3576,6 +3641,63 @@ class TestAutoTitle:
         )
         assert service.stored.title == "✨ Generated"
         service.save_meta.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_autotitle_counts_a_provider_connections_key_as_a_credential(
+        self, tmp_path, monkeypatch, request
+    ):
+        """A title profile with no inline key, linked to a provider connection
+        that holds one, is used: the credential check sees the LLM as the
+        profile store resolves it."""
+        from openhands.agent_server.persistence import reset_stores
+        from openhands.sdk.llm.llm_profile_store import LLMProfileStore
+        from openhands.sdk.llm.provider_connection_store import (
+            ProviderConnection,
+            ProviderConnectionStore,
+        )
+
+        ProviderConnectionStore(base_dir=tmp_path / "provider-connections").create(
+            ProviderConnection(
+                id="openai-conn",
+                display_name="OpenAI",
+                provider="openai",
+                api_key=SecretStr("sk-connection"),
+                created_at=0,
+                updated_at=0,
+            )
+        )
+        LLMProfileStore(base_dir=tmp_path / "profiles").save(
+            "title-linked",
+            LLM(
+                usage_id="title-llm",
+                model="gpt-5.5",
+                provider_connection_id="openai-conn",
+            ),
+        )
+        service = self._make_service(
+            title_llm_profile="title-linked", llm_usage_id="acp-managed"
+        )
+
+        monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path))
+        reset_stores()
+        request.addfinalizer(reset_stores)
+
+        title_llms: list[LLM] = []
+
+        def record_title_llm(_message, llm, *_args, **_kwargs):
+            title_llms.append(llm)
+            return "Linked Profile Title"
+
+        with patch(self._TITLE_WITH_LLM_PATH, side_effect=record_title_llm):
+            subscriber = AutoTitleSubscriber(service=service)
+            await subscriber(self._user_message_event())
+            await self._drain_title_task(lambda: service.stored.title is not None)
+
+        assert [llm.usage_id for llm in title_llms] == ["title-llm"]
+        api_key = title_llms[0].api_key
+        assert isinstance(api_key, SecretStr)
+        assert api_key.get_secret_value() == "sk-connection"
+        assert service.stored.title == "Linked Profile Title"
 
     @pytest.mark.asyncio
     async def test_autotitle_decrypts_cipher_encrypted_title_profile(
