@@ -312,9 +312,9 @@ def test_seed_acp_does_not_backfill_llm_profile(client, default_llm_profile_stor
     ],
 )
 def test_llm_has_real_config(llm, expected):
-    """``_llm_has_real_config`` gates the seed so only real, pre-existing
+    """``llm_has_real_config`` gates the seed so only real, pre-existing
     configuration is mirrored into a persisted 'default' LLM profile (#4031)."""
-    assert router_module._llm_has_real_config(llm) is expected
+    assert router_module.llm_has_real_config(llm) is expected
 
 
 def test_no_seed_when_store_nonempty(client, store):
