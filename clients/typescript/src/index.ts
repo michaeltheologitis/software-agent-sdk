@@ -153,7 +153,7 @@ export { BashWebSocketClient } from './events/bash-websocket-client';
 export type { BashWebSocketClientOptions } from './events/bash-websocket-client';
 
 // HTTP client
-export { HttpClient, HttpError } from './client/http-client';
+export { HttpClient, HttpError, isHttpError } from './client/http-client';
 export { HooksClient } from './client/hooks-client';
 export { MCPClient } from './client/mcp-client';
 export { WorkspacesClient } from './client/workspaces-client';
@@ -199,6 +199,7 @@ export type {
   FileOperationResult,
   FileDownloadResult,
   GitChange,
+  GitChangeStatus,
   GitDiff,
   ExecuteBashRequest,
   BashEventBase,
@@ -231,6 +232,12 @@ export type {
 // ACP provider registry (mirrors openhands-sdk; see scripts/validate-acp-providers.mjs)
 export { ACP_PROVIDERS, ACP_SETTINGS_KEYS, getAcpProvider } from './models/acp';
 export type { ACPModelOption, ACPProviderInfo, ACPProviderKey } from './models/acp';
+export type {
+  ACPModelDiscovery,
+  ACPModelDiscoveryError,
+  ACPModelDiscoveryRequest,
+  ACPModelInfo,
+} from './models/acp-model-discovery';
 
 // ACP session controls (mirrors openhands-sdk acp_models.py)
 export { ACP_SESSION_CONTROLS_EVENT_KIND } from './models/acp-session-controls';
@@ -260,6 +267,7 @@ export type {
   LaunchedAgentProfile,
   LaunchedProfile,
 } from './models/agent-profile';
+export type { ToolCatalogEntry, ToolCatalogResponse } from './models/tool-catalog';
 
 // Agent profiles client
 export { AgentProfilesClient } from './client/agent-profiles-client';
@@ -311,7 +319,12 @@ export type {
 } from './models/conversation';
 
 // Client options
-export type { HttpClientOptions, RequestOptions, HttpResponse } from './client/http-client';
+export type {
+  HttpClientOptions,
+  RequestOptions,
+  HttpResponse,
+  HttpValidationErrorItem,
+} from './client/http-client';
 export type { HooksClientOptions } from './client/hooks-client';
 export type { MCPClientOptions } from './client/mcp-client';
 export type {
@@ -510,7 +523,7 @@ import { RemoteState } from './conversation/remote-state';
 import { RemoteEventsList } from './events/remote-events-list';
 import { WebSocketCallbackClient } from './events/websocket-client';
 import { BashWebSocketClient } from './events/bash-websocket-client';
-import { HttpClient, HttpError } from './client/http-client';
+import { HttpClient, HttpError, isHttpError } from './client/http-client';
 import { HooksClient } from './client/hooks-client';
 import { MCPClient } from './client/mcp-client';
 import { WorkspacesClient } from './client/workspaces-client';
@@ -565,6 +578,7 @@ export default {
   BashWebSocketClient,
   HttpClient,
   HttpError,
+  isHttpError,
   HooksClient,
   MCPClient,
   WorkspacesClient,

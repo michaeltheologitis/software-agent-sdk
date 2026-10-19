@@ -36,8 +36,15 @@ from openhands.sdk.settings import (
     LLMSummarizingCondenserSettings,
     NoOpCondenserSettings,
     VerificationSettings,
+    apply_agent_settings_diff,
 )
-from openhands.sdk.settings.model import ACPServerKind
+from openhands.sdk.settings.model import (
+    ACPServerKind,
+    _agent_settings_discriminator,
+    _condenser_settings_discriminator,
+    _migrate_agent_settings_payload,
+    export_settings_schema,
+)
 from openhands.sdk.workspace import LocalWorkspace
 
 
@@ -70,8 +77,6 @@ def test_llm_agent_settings_export_schema_groups_sections() -> None:
     assert set(general_fields) == {
         "agent",
         "tools",
-        "enable_sub_agents",
-        "enable_switch_llm_tool",
         "enable_classify_and_switch_llm_tool",
         "active_meta_profile",
         "tool_concurrency_limit",
@@ -83,14 +88,6 @@ def test_llm_agent_settings_export_schema_groups_sections() -> None:
     # None = "server default toolset" (materialized by create_agent, #3978).
     assert general_fields["tools"].default is None
     assert general_fields["tools"].prominence is SettingProminence.MAJOR
-    assert general_fields["enable_sub_agents"].value_type == "boolean"
-    assert general_fields["enable_sub_agents"].default is False
-    assert general_fields["enable_sub_agents"].prominence is SettingProminence.MAJOR
-    assert general_fields["enable_switch_llm_tool"].value_type == "boolean"
-    assert general_fields["enable_switch_llm_tool"].default is True
-    assert (
-        general_fields["enable_switch_llm_tool"].prominence is SettingProminence.MINOR
-    )
     assert general_fields["tool_concurrency_limit"].value_type == "integer"
     assert general_fields["tool_concurrency_limit"].default == 1
     assert (
@@ -227,6 +224,16 @@ def test_conversation_settings_export_schema_groups_sections() -> None:
     assert verification_fields["security_analyzer"].depends_on == ["confirmation_mode"]
 
 
+def test_export_settings_schema_remains_backward_compatible():
+    """export_settings_schema produces identical structured schemas."""
+    schema_openhands = export_settings_schema(OpenHandsAgentSettings)
+    assert any(s.key == "general" for s in schema_openhands.sections)
+    assert any(s.key == "llm" for s in schema_openhands.sections)
+
+    schema_acp = export_settings_schema(ACPAgentSettings)
+    assert any(s.key == "acp" for s in schema_acp.sections)
+
+
 def test_conversation_settings_validates_observability_metadata() -> None:
     settings = ConversationSettings(observability_metadata={"repo": "OpenHands/sdk"})
     assert settings.observability_metadata == {"repo": "OpenHands/sdk"}
@@ -356,8 +363,6 @@ def test_export_agent_settings_schema_emits_variant_tagged_sections() -> None:
     assert general_keys == {
         "agent",
         "tools",
-        "enable_sub_agents",
-        "enable_switch_llm_tool",
         "enable_classify_and_switch_llm_tool",
         "active_meta_profile",
         "tool_concurrency_limit",
@@ -419,6 +424,42 @@ def test_default_agent_settings_returns_openhands_variant() -> None:
     s = default_agent_settings()
     assert isinstance(s, OpenHandsAgentSettings)
     assert s.agent_kind == "openhands"
+
+
+def test_condenser_settings_discriminator_declared_on_base():
+    """CondenserSettings base declares condenser_kind.
+
+    The discriminator accesses it directly without getattr.
+    """
+    base = CondenserSettings(enabled=True)
+    assert base.condenser_kind == "llm_summarizing"
+    assert _condenser_settings_discriminator(base) == "llm_summarizing"
+
+    summarizing = LLMSummarizingCondenserSettings(enabled=True)
+    assert summarizing.condenser_kind == "llm_summarizing"
+    assert _condenser_settings_discriminator(summarizing) == "llm_summarizing"
+
+    noop = NoOpCondenserSettings(enabled=True)
+    assert noop.condenser_kind == "no_op"
+    assert _condenser_settings_discriminator(noop) == "no_op"
+
+
+def test_agent_settings_discriminator_declared_on_base():
+    """AgentSettingsBase declares agent_kind.
+
+    The discriminator accesses it directly without getattr.
+    """
+    base = AgentSettingsBase()
+    assert base.agent_kind == "openhands"
+    assert _agent_settings_discriminator(base) == "openhands"
+
+    openhands_settings = OpenHandsAgentSettings()
+    assert openhands_settings.agent_kind == "openhands"
+    assert _agent_settings_discriminator(openhands_settings) == "openhands"
+
+    acp_settings = ACPAgentSettings()
+    assert acp_settings.agent_kind == "acp"
+    assert _agent_settings_discriminator(acp_settings) == "acp"
 
 
 def test_validate_agent_settings_defaults_to_openhands_when_discriminator_missing() -> (
@@ -1002,6 +1043,7 @@ def test_llm_create_agent_uses_settings_llm_and_tools() -> None:
     assert isinstance(agent, Agent)
     assert agent.llm is llm
     assert agent.tools == tools
+    assert "SwitchLLMTool" not in agent.include_default_tools
 
 
 def test_llm_create_agent_defaults_tool_concurrency_limit_to_one() -> None:
@@ -1017,19 +1059,328 @@ def test_create_agent_defaults_tools_when_none() -> None:
     assert settings.tools is None
     agent = settings.create_agent()
     assert [t.name for t in agent.tools] == ["terminal", "file_editor", "task_tracker"]
+    assert "SwitchLLMTool" in agent.include_default_tools
 
 
-def test_create_agent_default_tools_honor_enable_sub_agents() -> None:
-    settings = OpenHandsAgentSettings(
-        llm=LLM(model="test-model"), enable_sub_agents=True
+@pytest.mark.parametrize("switch", ["enable_sub_agents", "enable_switch_llm_tool"])
+def test_removed_switches_are_rejected_by_settings_and_diffs(switch: str) -> None:
+    payload = {"llm": {"model": "test-model"}, switch: True}
+    with pytest.raises(ValidationError, match="Removed agent settings"):
+        OpenHandsAgentSettings.model_validate(payload)
+    with pytest.raises(ValueError, match="Removed agent settings"):
+        validate_agent_settings(payload)
+    with pytest.raises(ValidationError, match="Removed agent settings"):
+        apply_agent_settings_diff(OpenHandsAgentSettings(), {switch: True})
+
+
+def test_create_agent_collapses_duplicate_tools() -> None:
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"),
+        tools=[
+            Tool(name="terminal"),
+            Tool(name="terminal", params={"username": "dev"}),
+        ],
+    ).create_agent()
+
+    assert [(t.name, t.params) for t in agent.tools] == [
+        ("terminal", {"username": "dev"})
+    ]
+
+
+def test_explicit_tools_without_switch_llm_get_no_switch_llm() -> None:
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"), tools=[Tool(name="terminal")]
+    ).create_agent()
+
+    assert [t.name for t in agent.tools] == ["terminal"]
+    assert "SwitchLLMTool" not in agent.include_default_tools
+
+
+@pytest.mark.parametrize("name", ["switch_llm", "SwitchLLMTool"])
+def test_selected_builtin_reaches_the_agent_by_class_name(name: str) -> None:
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"),
+        tools=[Tool(name=name)],
+    ).create_agent()
+
+    assert agent.tools == []
+    assert agent.include_default_tools.count("SwitchLLMTool") == 1
+
+
+def test_builtin_with_params_reaches_the_agent_by_class_name() -> None:
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"),
+        tools=[Tool(name="finish", params={"response_schema": {"type": "object"}})],
+    ).create_agent()
+
+    assert agent.tools == [
+        Tool(name="FinishTool", params={"response_schema": {"type": "object"}})
+    ]
+    assert "FinishTool" not in agent.include_default_tools
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [
+            Tool(name="finish", params={"response_schema": {"type": "object"}}),
+            Tool(name="FinishTool"),
+        ],
+        [
+            Tool(name="FinishTool"),
+            Tool(name="finish", params={"response_schema": {"type": "object"}}),
+        ],
+    ],
+)
+def test_builtin_named_twice_is_attached_once(tools: list[Tool]) -> None:
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"), tools=tools
+    ).create_agent()
+
+    assert agent.tools == [
+        Tool(name="FinishTool", params={"response_schema": {"type": "object"}})
+    ]
+    assert "FinishTool" not in agent.include_default_tools
+
+
+def test_registered_tool_named_like_a_builtin_is_not_replaced(monkeypatch) -> None:
+    from openhands.sdk.tool import registry
+    from openhands.sdk.tool.builtins import ThinkTool
+
+    class _CustomThinkTool(ThinkTool):
+        pass
+
+    monkeypatch.setitem(registry._TOOL_CLASSES, "think", _CustomThinkTool)
+
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"), tools=[Tool(name="think")]
+    ).create_agent()
+
+    assert agent.tools == [Tool(name="think")]
+
+
+def test_retired_tool_switches_are_not_serialized() -> None:
+    dumped = OpenHandsAgentSettings(llm=LLM(model="test-model")).model_dump(mode="json")
+
+    assert "enable_sub_agents" not in dumped
+    assert "enable_switch_llm_tool" not in dumped
+
+
+def test_settings_re_saved_with_new_tools_keep_them() -> None:
+    stored = OpenHandsAgentSettings(llm=LLM(model="test-model"))
+    payload = {
+        **stored.model_dump(mode="json"),
+        "tools": [{"name": "terminal"}, {"name": "glob"}],
+    }
+
+    settings = validate_agent_settings(payload)
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert [t.name for t in settings.tools or []] == ["terminal", "glob"]
+
+
+@pytest.mark.parametrize(
+    ("switches", "expected"),
+    [
+        ({}, ["terminal", "switch_llm"]),
+        ({"enable_switch_llm_tool": False}, ["terminal"]),
+        ({"enable_sub_agents": True}, ["terminal", "switch_llm"]),
+    ],
+)
+def test_v6_settings_fold_the_retired_switches(
+    switches: dict[str, bool], expected: list[str]
+) -> None:
+    settings = validate_agent_settings(
+        {
+            "schema_version": 6,
+            "agent_kind": "openhands",
+            "llm": {"model": "test-model"},
+            "tools": [{"name": "terminal"}],
+            **switches,
+        }
     )
-    agent = settings.create_agent()
-    assert [t.name for t in agent.tools] == [
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
+    assert [t.name for t in settings.tools or []] == expected
+
+
+def test_v6_settings_pin_the_standard_set_the_server_launches() -> None:
+    settings = validate_agent_settings(
+        {
+            "schema_version": 6,
+            "agent_kind": "openhands",
+            "llm": {"model": "test-model"},
+            "enable_sub_agents": True,
+        }
+    )
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert [t.name for t in settings.tools or []] == [
         "terminal",
         "file_editor",
         "task_tracker",
+        "browser_tool_set",
         "task_tool_set",
+        "switch_llm",
     ]
+
+
+_PINNED_WITH_SUB_AGENTS = [
+    "terminal",
+    "file_editor",
+    "task_tracker",
+    "browser_tool_set",
+    "task_tool_set",
+    "switch_llm",
+]
+
+
+@pytest.mark.parametrize("schema_version", [5, 6])
+@pytest.mark.parametrize(
+    ("switches", "expected"),
+    [
+        ({}, None),
+        ({"enable_sub_agents": False, "enable_switch_llm_tool": True}, None),
+        (
+            {"enable_sub_agents": True, "enable_switch_llm_tool": True},
+            _PINNED_WITH_SUB_AGENTS,
+        ),
+        (
+            {"enable_switch_llm_tool": False},
+            ["terminal", "file_editor", "task_tracker", "browser_tool_set"],
+        ),
+    ],
+)
+def test_persisted_empty_tools_migrate_as_the_standard_set(
+    schema_version: int, switches: dict[str, bool], expected: list[str] | None
+) -> None:
+    settings = validate_agent_settings(
+        {
+            "schema_version": schema_version,
+            "agent_kind": "openhands",
+            "llm": {"model": "test-model"},
+            "tools": [],
+            **switches,
+        }
+    )
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert (
+        None if settings.tools is None else [t.name for t in settings.tools]
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("tools", "expected"),
+    [
+        (None, None),
+        ([], None),
+        ([{"name": "terminal"}], ["terminal", "switch_llm"]),
+    ],
+)
+def test_unversioned_persisted_settings_migrate_as_legacy_rows(
+    tools: list[dict[str, str]] | None, expected: list[str] | None
+) -> None:
+    payload = {"agent_kind": "openhands", "llm": {"model": "m"}, "tools": tools}
+
+    settings = validate_agent_settings(payload, persisted=True)
+    concrete = OpenHandsAgentSettings.from_persisted(payload)
+
+    for loaded in (settings, concrete):
+        assert isinstance(loaded, OpenHandsAgentSettings)
+        assert (
+            None if loaded.tools is None else [t.name for t in loaded.tools]
+        ) == expected
+
+
+@pytest.mark.parametrize("schema_version", ["absent", None])
+@pytest.mark.parametrize(
+    ("tools", "expected"),
+    [
+        (None, None),
+        ([], []),
+        ([{"name": "terminal"}], ["terminal"]),
+    ],
+)
+def test_unversioned_settings_get_no_retired_switch_defaults(
+    schema_version: str | None,
+    tools: list[dict[str, str]] | None,
+    expected: list[str] | None,
+) -> None:
+    payload: dict[str, object] = {
+        "agent_kind": "openhands",
+        "llm": {"model": "test-model"},
+        "tools": tools,
+    }
+    if schema_version is None:
+        payload["schema_version"] = None
+
+    settings = validate_agent_settings(payload)
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
+    assert (
+        None if settings.tools is None else [t.name for t in settings.tools]
+    ) == expected
+
+
+def test_unversioned_persisted_settings_fold_switches_they_carry() -> None:
+    settings = OpenHandsAgentSettings.from_persisted(
+        {
+            "agent_kind": "openhands",
+            "llm": {"model": "test-model"},
+            "tools": [{"name": "terminal"}, {"name": "switch_llm"}],
+            "enable_switch_llm_tool": False,
+        }
+    )
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert [t.name for t in settings.tools or []] == ["terminal"]
+
+
+def test_unversioned_acp_settings_drop_the_retired_switches() -> None:
+    payload = _migrate_agent_settings_payload(
+        {"agent_kind": "acp", "acp_server": "claude-code", "enable_sub_agents": True},
+        persisted=True,
+    )
+
+    assert payload["schema_version"] == AGENT_SETTINGS_SCHEMA_VERSION
+    assert "enable_sub_agents" not in payload
+
+
+def test_unversioned_acp_settings_drop_the_deprecated_llm() -> None:
+    payload = _migrate_agent_settings_payload(
+        {"agent_kind": "acp", "acp_server": "claude-code", "llm": {"model": "x"}},
+        persisted=True,
+    )
+
+    assert "llm" not in payload
+
+
+def test_v6_sub_agents_off_keeps_an_explicit_sub_agent_tool() -> None:
+    settings = validate_agent_settings(
+        {
+            "schema_version": 6,
+            "agent_kind": "openhands",
+            "llm": {"model": "test-model"},
+            "tools": [{"name": "task_tool_set"}],
+            "enable_sub_agents": False,
+            "enable_switch_llm_tool": False,
+        }
+    )
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert [t.name for t in settings.tools or []] == ["task_tool_set"]
+
+
+def test_explicitly_selected_switch_llm_is_not_added_twice() -> None:
+    agent = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"), tools=[Tool(name="switch_llm")]
+    ).create_agent()
+
+    assert agent.tools == []
+    assert agent.include_default_tools.count("SwitchLLMTool") == 1
 
 
 def test_create_agent_empty_tools_stays_bare() -> None:
@@ -1038,6 +1389,21 @@ def test_create_agent_empty_tools_stays_bare() -> None:
     settings = OpenHandsAgentSettings(llm=LLM(model="test-model"), tools=[])
     agent = settings.create_agent()
     assert agent.tools == []
+
+
+def test_create_agent_applies_persona() -> None:
+    settings = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"), tools=[], persona="You are a classifier."
+    )
+    agent = settings.create_agent()
+    assert agent.persona == "You are a classifier."
+    assert agent.static_system_message.startswith("You are a classifier.")
+
+
+def test_create_agent_without_persona_uses_builtin_prompt() -> None:
+    settings = OpenHandsAgentSettings.model_validate({"agent_kind": "openhands"})
+    assert settings.persona is None
+    assert settings.create_agent().persona is None
 
 
 def test_tool_concurrency_limit_defaults_to_one_when_omitted_from_payload() -> None:
@@ -1755,14 +2121,17 @@ def test_acp_create_agent_ignores_llm_credentials() -> None:
     # credentials ride the conversation secrets channel keyed by the provider's
     # env var name; the caller's secrets pass through untouched.
     context = AgentContext(secrets={"GITHUB_TOKEN": "ghp_test"})
-    settings = ACPAgentSettings(
-        acp_server="codex",
-        llm=LLM(
-            model="gpt-5.4",
-            api_key=SecretStr("sk-openai"),
-            base_url="https://llm-proxy.example.com",
-        ),
-        agent_context=context,
+    settings = ACPAgentSettings.from_persisted(
+        dict(
+            agent_kind="acp",
+            acp_server="codex",
+            llm=LLM(
+                model="gpt-5.4",
+                api_key=SecretStr("sk-openai"),
+                base_url="https://llm-proxy.example.com",
+            ),
+            agent_context=context,
+        )
     )
 
     agent = settings.create_agent()
@@ -1775,9 +2144,12 @@ def test_acp_create_agent_ignores_llm_credentials() -> None:
 def test_acp_create_agent_ignores_credentials_without_context() -> None:
     # No caller agent_context: nothing is synthesized for the ignored creds —
     # the context stays None.
-    settings = ACPAgentSettings(
-        acp_server="claude-code",
-        llm=LLM(model="claude-opus-4-6", api_key=SecretStr("sk-ui-key")),
+    settings = ACPAgentSettings.from_persisted(
+        dict(
+            agent_kind="acp",
+            acp_server="claude-code",
+            llm=LLM(model="claude-opus-4-6", api_key=SecretStr("sk-ui-key")),
+        )
     )
 
     agent = settings.create_agent()
@@ -1798,17 +2170,11 @@ def test_acp_create_agent_keeps_acp_managed_llm(
     assert agent.llm.model == expected_model
 
 
-@pytest.mark.usefixtures("acp_llm_deprecated")
-def test_acp_settings_llm_warns_and_is_ignored() -> None:
-    with pytest.warns(DeprecatedWarning, match="ACPAgentSettings.llm"):
-        settings = ACPAgentSettings(
-            llm=LLM(model="gpt-5.6", api_key=SecretStr("sk-explicit"))
-        )
-
-    assert settings.create_agent().llm.usage_id == ACP_SENTINEL_USAGE_ID
-    assert "llm" not in settings.model_dump()
-    dumped = settings.model_dump_json(context={"expose_secrets": "plaintext"})
-    assert "sk-explicit" not in dumped
+def test_acp_settings_llm_is_removed() -> None:
+    with pytest.raises(ValidationError, match="ACPAgentSettings.llm was removed"):
+        ACPAgentSettings.model_validate({"llm": {"model": "gpt-5.6"}})
+    with pytest.raises(AttributeError):
+        _ = getattr(ACPAgentSettings(), "llm")
 
 
 @pytest.mark.usefixtures("acp_llm_deprecated")
@@ -2710,3 +3076,45 @@ def test_create_subscription_llm_from_config_preserves_non_auth_options(
     assert "api_key" not in captured
     assert "base_url" not in captured
     assert "is_subscription" not in captured
+
+
+@pytest.mark.parametrize("tools", [None, [], [{"name": "terminal"}]])
+def test_saved_v8_retired_switches_are_discarded_without_crashing(tools) -> None:
+    settings = OpenHandsAgentSettings.from_persisted(
+        {
+            "schema_version": 8,
+            "llm": {"model": "m"},
+            "tools": tools,
+            "enable_sub_agents": True,
+            "enable_switch_llm_tool": False,
+        }
+    )
+    dumped = settings.model_dump(mode="json")
+    assert dumped["tools"] == (
+        None
+        if tools is None
+        else [{"name": tool["name"], "params": {}} for tool in tools]
+    )
+    assert (
+        OpenHandsAgentSettings.from_persisted(dumped).model_dump(mode="json") == dumped
+    )
+    assert "enable_sub_agents" not in dumped
+    assert "enable_switch_llm_tool" not in dumped
+    with pytest.raises(AttributeError):
+        getattr(settings, "enable_sub_agents")
+
+
+@pytest.mark.parametrize("schema_version", [None, 6, 7, 8])
+def test_saved_acp_llm_is_discarded_without_leaking_credentials(schema_version) -> None:
+    settings = ACPAgentSettings.from_persisted(
+        {
+            "schema_version": schema_version,
+            "agent_kind": "acp",
+            "acp_model": "sonnet",
+            "llm": {"model": "ignored", "api_key": "sk-old"},
+            "enable_sub_agents": True,
+        }
+    )
+    assert settings.acp_model == "sonnet"
+    assert "sk-old" not in settings.model_dump_json(context={"expose_secrets": True})
+    assert settings.create_agent().llm.usage_id == ACP_SENTINEL_USAGE_ID

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
+from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
 from websockets.exceptions import ConnectionClosed
 
 from openhands.sdk.agent.base import AgentBase
@@ -34,6 +35,7 @@ from openhands.sdk.conversation.title_utils import generate_conversation_title
 from openhands.sdk.conversation.types import (
     ConversationCallbackType,
     ConversationID,
+    ConversationTokenCallbackType,
     StuckDetectionThresholds,
     TraceMetadataValue,
 )
@@ -49,11 +51,18 @@ from openhands.sdk.event.conversation_state import (
     ConversationStateUpdateEvent,
 )
 from openhands.sdk.event.llm_completion_log import LLMCompletionLogEvent
+from openhands.sdk.event.streaming_delta import StreamingDeltaEvent
 from openhands.sdk.event.types import EventID
 from openhands.sdk.hooks import HookConfig
 from openhands.sdk.llm import LLM, Message, TextContent
 from openhands.sdk.logger import DEBUG, get_logger
-from openhands.sdk.observability.laminar import OPERATION_METADATA_KEY, observe
+from openhands.sdk.observability.laminar import (
+    OPERATION_METADATA_KEY,
+    default_observability_span_name_from_env,
+    merge_observability_metadata,
+    observability_parent_span_context_from_env,
+    observe,
+)
 from openhands.sdk.security.analyzer import SecurityAnalyzerBase
 from openhands.sdk.security.confirmation_policy import (
     ConfirmationPolicyBase,
@@ -91,6 +100,26 @@ def _validate_remote_agent(agent_data: dict) -> AgentBase:
 
         return ACPAgent.model_validate(agent_data)
     return AgentBase.model_validate(agent_data)
+
+
+def _token_delta_callback(
+    token_callbacks: list[ConversationTokenCallbackType],
+) -> ConversationCallbackType:
+    """Hand each streamed delta from the events socket to the token callbacks."""
+    on_token = BaseConversation.compose_callbacks(token_callbacks)
+
+    def callback(event: Event) -> None:
+        if isinstance(event, StreamingDeltaEvent):
+            delta = Delta(
+                content=event.content, reasoning_content=event.reasoning_content
+            )
+            on_token(
+                ModelResponseStream(
+                    id=event.id, choices=[StreamingChoices(index=0, delta=delta)]
+                )
+            )
+
+    return callback
 
 
 def _restore_tool_registrations(tool_module_qualnames: Mapping[str, str]) -> None:
@@ -495,9 +524,16 @@ class RemoteEventsList(EventsListBase):
         return len(self._cached_events) - 1
 
     def create_default_callback(self) -> ConversationCallbackType:
-        """Create a default callback that adds events to this list."""
+        """Create a default callback that adds events to this list.
+
+        Streamed ``StreamingDeltaEvent`` frames are transient: the server never
+        stores them, so they reach the other callbacks but stay out of this
+        list, which keeps matching the server's event log.
+        """
 
         def callback(event: Event) -> None:
+            if isinstance(event, StreamingDeltaEvent):
+                return
             self.add_event(event)
 
         return callback
@@ -747,6 +783,8 @@ class RemoteConversation(BaseConversation):
         observability_metadata: dict[str, TraceMetadataValue] | None = None,
         observability_tags: list[str] | None = None,
         observability_span_name: str = "conversation",
+        observability_parent_span_context: str | None = None,
+        token_callbacks: list[ConversationTokenCallbackType] | None = None,
         **_: object,
     ) -> None:
         """Remote conversation proxy that talks to an agent server.
@@ -784,7 +822,18 @@ class RemoteConversation(BaseConversation):
             observability_tags: Optional root span tags for observability backends.
             observability_span_name: Optional child span name for observability
                       backends. The root span remains named "conversation".
+            token_callbacks: Optional callbacks invoked with each streamed token
+                      delta the server sends (agent LLM with ``stream=True``).
         """
+        observability_metadata = merge_observability_metadata(observability_metadata)
+        observability_parent_span_context = (
+            observability_parent_span_context
+            or observability_parent_span_context_from_env()
+        )
+        default_span_name = default_observability_span_name_from_env()
+        if default_span_name and observability_span_name == "conversation":
+            observability_span_name = default_span_name
+
         # Client tool specs the server already has persisted for this
         # conversation (populated when re-attaching to an existing one). These
         # must be registered locally before the initial event sync so that
@@ -868,6 +917,7 @@ class RemoteConversation(BaseConversation):
                 if observability_tags is not None
                 else [],
                 "observability_span_name": observability_span_name,
+                "observability_parent_span_context": observability_parent_span_context,
                 "user_id": user_id,
             }
             if user_id:
@@ -911,6 +961,7 @@ class RemoteConversation(BaseConversation):
             workspace=workspace,
             conversation_id=conversation_id,
             callbacks=callbacks,
+            token_callbacks=token_callbacks,
             max_iteration_per_run=max_iteration_per_run,
             client_tools=[*(client_tools or []), *attached_client_tools],
             visualizer=visualizer,
@@ -929,6 +980,7 @@ class RemoteConversation(BaseConversation):
             metadata=observability_metadata,
             tags=observability_tags,
             conversation_tags=tags,
+            parent_span_context=observability_parent_span_context,
         )
         # All hooks (including SessionStart/SessionEnd) are executed server-side.
         # hook_config is sent in the creation payload.
@@ -947,10 +999,27 @@ class RemoteConversation(BaseConversation):
     ) -> Self:
         """Submit a creation request and connect to the returned conversation.
 
-        The request selects the agent or saved server profile and all server
-        options. A supplied conversation ID follows the server's idempotency
-        contract; this method does not probe for an existing conversation.
+        The request selects the agent source (``agent``, ``agent_settings`` or a
+        saved ``agent_profile_id``) and all server options. A supplied
+        conversation ID follows the server's idempotency contract; this method
+        does not probe for an existing conversation.
         """
+        updates: dict[str, object] = {
+            "observability_metadata": merge_observability_metadata(
+                request.observability_metadata
+            ),
+        }
+        default_span_name = default_observability_span_name_from_env()
+        if default_span_name and request.observability_span_name == "conversation":
+            updates["observability_span_name"] = default_span_name
+        parent_span_context = (
+            request.observability_parent_span_context
+            or observability_parent_span_context_from_env()
+        )
+        if parent_span_context:
+            updates["observability_parent_span_context"] = parent_span_context
+        request = request.model_copy(update=updates)
+
         response = _send_request(
             workspace.client,
             "POST",
@@ -969,6 +1038,7 @@ class RemoteConversation(BaseConversation):
             metadata=request.observability_metadata,
             tags=request.observability_tags,
             conversation_tags=request.tags,
+            parent_span_context=request.observability_parent_span_context,
         )
         return conversation
 
@@ -1032,10 +1102,13 @@ class RemoteConversation(BaseConversation):
         visualizer: (
             type[ConversationVisualizerBase] | ConversationVisualizerBase | None
         ),
+        token_callbacks: list[ConversationTokenCallbackType] | None = None,
     ) -> None:
         super().__init__()  # Initialize base class with span tracking
         self.agent = agent
         self._callbacks = callbacks or []
+        if token_callbacks:
+            self._callbacks.append(_token_delta_callback(token_callbacks))
         self.max_iteration_per_run = max_iteration_per_run
         self.workspace = workspace
         self._client = workspace.client
@@ -1138,13 +1211,40 @@ class RemoteConversation(BaseConversation):
         all_callbacks = self._callbacks + [run_complete_callback]
         composed_callback = BaseConversation.compose_callbacks(all_callbacks)
 
+        # Track which events the callbacks have seen, so that events the
+        # server recorded while the socket was reconnecting (and that only
+        # reached the cache through REST reconciliation) can be replayed to
+        # them once, without the live socket delivering them a second time.
+        delivered_ids: set[str] = set()
+        replayed_ids: set[str] = set()
+
+        def socket_callback(event: Event) -> None:
+            if event.id in replayed_ids:
+                replayed_ids.discard(event.id)
+                return
+            delivered_ids.add(event.id)
+            composed_callback(event)
+
+        def replay_missed_events() -> None:
+            self._state.events.reconcile()
+            replayed_ids.clear()
+            for event in self._state.events[:]:
+                if event.id in delivered_ids:
+                    continue
+                delivered_ids.add(event.id)
+                replayed_ids.add(event.id)
+                try:
+                    composed_callback(event)
+                except Exception:
+                    logger.exception("ws_replay_callback_error", stack_info=True)
+
         # Initialize WebSocket client for callbacks
         self._ws_client = WebSocketCallbackClient(
             host=self.workspace.host,
             conversation_id=str(self._id),
-            callback=composed_callback,
+            callback=socket_callback,
             api_key=self.workspace.api_key,
-            on_reconnect=self._state.events.reconcile,
+            on_reconnect=replay_missed_events,
         )
         self._ws_client.start()
 
@@ -1182,6 +1282,9 @@ class RemoteConversation(BaseConversation):
         # were emitted between the initial REST sync and WebSocket subscription.
         # This is the "reconciliation" part of the subscription handshake.
         self._state.events.reconcile()
+        # Callbacks are not replayed history: only events recorded after this
+        # point and missed by the socket are replayed on reconnect.
+        delivered_ids.update(event.id for event in self._state.events[:])
 
     def _create_llm_completion_log_callback(self) -> ConversationCallbackType:
         """Create a callback that writes LLM completion logs to client filesystem."""
@@ -1759,8 +1862,6 @@ class RemoteConversation(BaseConversation):
             self.agent.model_dump(context={"expose_secrets": True}),
         )
 
-        # Use server-returned tags (which include merged title) rather than
-        # the input tags, so the client-side object stays consistent.
         server_tags: dict[str, str] | None = fork_info.get("tags") or None
 
         return RemoteConversation(
