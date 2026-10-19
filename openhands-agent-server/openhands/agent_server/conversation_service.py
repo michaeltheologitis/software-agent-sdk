@@ -15,6 +15,7 @@ from weakref import WeakValueDictionary
 import httpx
 from pydantic import BaseModel
 
+from openhands.agent_server.agent_profiles_router import llm_has_real_config
 from openhands.agent_server.config import ACPSkillSourcing, Config, WebhookSpec
 from openhands.agent_server.conversation_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
@@ -2789,9 +2790,9 @@ class AutoTitleSubscriber(Subscriber):
         if not message_text:
             return
 
-        # Precedence: title_llm_profile (if configured and loads) → agent.llm →
-        # truncation. This keeps auto-titling non-breaking for consumers who
-        # don't configure title_llm_profile.
+        # Precedence: title_llm_profile (configured, loads, and has a credential)
+        # → agent.llm → truncation. This keeps auto-titling non-breaking for
+        # consumers who don't configure title_llm_profile.
         conversation = self.service._conversation
         title_llm = self._load_title_llm()
         if title_llm is None:
@@ -2831,9 +2832,11 @@ class AutoTitleSubscriber(Subscriber):
         """Load the LLM for title generation from profile store.
 
         Returns:
-            LLM instance if title_llm_profile is configured and loads
-            successfully, None otherwise. When None is returned, the caller
-            falls back to the agent's LLM (and then to message truncation).
+            LLM instance if title_llm_profile is configured, loads
+            successfully, and has a credential (``llm_has_real_config``; a
+            linked provider connection's key counts), None otherwise. When None
+            is returned, the caller falls back to the agent's LLM (and then to
+            message truncation).
         """
         profile_name = self.service.stored.title_llm_profile
         if not profile_name:
@@ -2845,13 +2848,20 @@ class AutoTitleSubscriber(Subscriber):
             )
 
             profile_store = get_llm_profile_store()
-            return profile_store.load(profile_name, cipher=self.service.cipher)
+            llm = profile_store.load(profile_name, cipher=self.service.cipher)
         except (FileNotFoundError, ValueError) as e:
             logger.warning(
                 f"Failed to load title LLM profile '{profile_name}': {e}. "
                 "Falling back to the agent's LLM."
             )
             return None
+        if not llm_has_real_config(llm):
+            logger.info(
+                f"Title LLM profile '{profile_name}' has no credential; "
+                "falling back to the agent's LLM."
+            )
+            return None
+        return llm
 
 
 @dataclass

@@ -116,7 +116,8 @@ def llm_has_real_config(llm: LLM) -> bool:
     account (``model="gpt-5.5"``, no ``api_key``). Only the former is worth
     mirroring into a named ``default`` LLM profile; persisting the latter leaves
     a keyless, non-functional "ghost" profile that the user never asked for and
-    that nothing ever cleans up (#4031).
+    that nothing ever cleans up (#4031). Also gates auto-titling's title LLM
+    (``AutoTitleSubscriber``).
     """
     if _has_api_key(llm):
         return True
